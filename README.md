@@ -1,2 +1,2 @@
-# OTR1
+# OTR1 BinanceTrading Robots
 Binance 
