@@ -1,19 +1,27 @@
 CONFIG = {
-    "TRADE_PAIRS": ["ETHUSDC", "DOGEUSDC", "BNBUSDC", "SOLUSDC", "VINEUSDT", "TSTUSDT", "KAITOUSDT", "AIXBTUSDT"],
-    "TRADE_PERCENTAGE": 0.5,          # 可用期货余额比例
-    "MAX_LEVERAGE": 20,
-    "MIN_NOTIONAL": 23,             # 最低下单金额，23 USDC
-    "OBSERVATION_PERIOD": 300,      # 观察期时长（秒）
-    "OBSERVATION_INTERVAL": 30,     # 观察间隔（秒）
-    "OBSERVATION_EXTRA_SCORE": 5,   # 观察期目标评分增量
-    "LSTM_UPDATE_THRESHOLD": 10,    # LSTM 在线更新时缓冲区样本数
+    "USER_REQUEST": "placeholder_value",  # Replace with the actual configuration or remove if unnecessary
+    "TRADE_PAIRS": ["XRPUSDT", "DOGEUSDT", "BNBUSDT", "VINEUSDT", "TSTUSDT", "AIXBTUSDT", "IPUSDT", "SUSDT", "KAIBUSDT",
+                    "SUIUSDT","WIFUSDC","BBUSDT"],
+    "TRADE_PERCENTAGE": 0.8,
+    "MAX_LEVERAGE": 1,
+    "MIN_NOTIONAL": 23,
+    "OBSERVATION_PERIOD": 15,
+    "OBSERVATION_INTERVAL": 2,
+    "OBSERVATION_EXTRA_SCORE": 5,
+    "LSTM_UPDATE_THRESHOLD": 10,
     "MIN_SLOPE_THRESHOLD": 0.0001,
-    "PREDICTION_WINDOW": 60,        # 用于预测的历史数据点数
-    "PREDICTION_MULTIPLIER": 20,    # 乘数（用于放大斜率的影响）
-    "EXPECTED_PROFIT_MULTIPLIER": 1,  # 默认预期收益乘数（动态调整时可能会变）
-    "THRESHOLD_SCORE_BUY": 60,      # 做多阀值
-    "THRESHOLD_SCORE_SELL": 40,     # 做空阀值
-    "MAX_PURCHASES_PER_ROUND": 3    # 每轮最多下单数
+    "PREDICTION_WINDOW": 60,
+    "PREDICTION_MULTIPLIER": 15,
+    "EXPECTED_PROFIT_MULTIPLIER": 1,
+    "THRESHOLD_SCORE_BUY": 60,
+    "THRESHOLD_SCORE_SELL": 30,
+    "MAX_PURCHASES_PER_ROUND": 10,
+    "MAX_HOLD_TIME": 300,
+    "TAKE_PROFIT": 9.0,
+    "STOP_LOSS": 7.0,
+    "MIN_MARGIN_BALANCE": 10,
+    "TREND_DURATION_THRESHOLD": 1440,
+    "ATR_HEDGE_THRESHOLD": 1.5
 }
 
-VERSION = "1.2.5.9.8"
+VERSION = "1.2.5.9.9"
