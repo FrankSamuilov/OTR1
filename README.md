@@ -1,5 +1,5 @@
 # OTR BinanceTrading Robots
-Binance 
+ 
 
 版权所有 (c) 2015 使用Python的交易员
 
@@ -20,3 +20,6 @@ Binance
 责任，无论是合同行为、侵权行为还是其他行为，均源于，
 因本软件或使用本软件或其他交易而产生的任何
 软件。
+
+
+From FrankSamuilov/dongyinbo 30.10。xxxx
