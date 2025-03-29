@@ -294,7 +294,7 @@ def calculate_smma(df: pd.DataFrame, period: int = 60) -> pd.DataFrame:
 
 
 def get_smc_trend_and_duration(df: pd.DataFrame, config: Optional[Dict[str, Any]] = None,
-                              logger: Optional[logging.Logger] = None) -> Tuple[str, int, Dict[str, Any]]:
+                               logger: Optional[logging.Logger] = None) -> Tuple[str, int, Dict[str, Any]]:
     """
     计算SMC趋势和趋势持续时间（分钟），集成订单块和流动性
     优化版本：减少所需数据量，整合多种指标进行趋势判断
@@ -334,7 +334,6 @@ def get_smc_trend_and_duration(df: pd.DataFrame, config: Optional[Dict[str, Any]
 
     print_colored(f"趋势分析 - 最近{len(closes)}个收盘价: {[round(x, 4) for x in closes]}", Colors.INFO)
 
-    # 尝试获取指标，如果不存在则跳过相应的检查
     try:
         # 价格模式分析 - 修正高点低点比较逻辑
         # 检查是否形成更高的高点和更高的低点
@@ -667,115 +666,116 @@ def get_smc_trend_and_duration(df: pd.DataFrame, config: Optional[Dict[str, Any]
                 "adx": adx if 'ADX' in df.columns else None
             })
 
-            return trend, duration, trend_info
+        return trend, duration, trend_info
 
-
-    def detect_order_blocks_3d(df, volume_threshold=1.3, price_deviation=0.002, consolidation_bars=3):
-        """
-        三维订单块检测：成交量+价格波动+震荡验证
-        参数：
-            volume_threshold: 成交量倍数阈值
-            price_deviation: 最大允许价格波动（ATR比率）
-            consolidation_bars: 震荡验证所需K线数
-        """
-        order_blocks = []
-        atr = df['ATR'].values
-
-        for i in range(1, len(df)):
-            # 成交量激增检测
-            vol_ratio = df['volume'].iloc[i] / df['volume'].iloc[i - 3:i].mean()
-
-            # 价格波动检测
-            price_change = abs(df['close'].iloc[i] - df['close'].iloc[i - 1])
-            atr_ratio = price_change / atr[i] if atr[i] > 0 else 0
-
-            # 震荡验证
-            is_consolidation = all(
-                abs(df['high'].iloc[j] - df['low'].iloc[j]) < 0.5 * atr[j]
-                for j in range(i - consolidation_bars + 1, i + 1)
-            )
-
-            if (vol_ratio > volume_threshold and
-                    atr_ratio < price_deviation and
-                    is_consolidation):
-                block_type = "bid" if df['close'].iloc[i] > df['open'].iloc[i] else "ask"
-                order_blocks.append({
-                    'index': i,
-                    'price': df['close'].iloc[i],
-                    'type': block_type,
-                    'strength': vol_ratio * (1 - atr_ratio)
-                })
-
-        # 趋势过滤：仅保留与当前趋势同向的订单块
-        trend = get_smc_trend(df)
-        return [b for b in order_blocks if
-                (trend == 'up' and b['type'] == 'bid') or
-                (trend == 'down' and b['type'] == 'ask')]
-
-
-        except Exception as e:
+    except Exception as e:
         print_colored(f"❌ 趋势分析出错: {e}", Colors.ERROR)
         if logger:
             logger.error(f"趋势分析出错: {e}")
         return "NEUTRAL", 0, {"confidence": "无", "reason": f"分析出错: {str(e)}"}
 
 
+def detect_order_blocks_3d(df, volume_threshold=1.3, price_deviation=0.002, consolidation_bars=3):
+    """
+    三维订单块检测：成交量+价格波动+震荡验证
+
+    参数：
+        volume_threshold: 成交量倍数阈值
+        price_deviation: 最大允许价格波动（ATR比率）
+        consolidation_bars: 震荡验证所需K线数
+    """
+    order_blocks = []
+    atr = df['ATR'].values
+
+    for i in range(1, len(df)):
+        # 成交量激增检测
+        vol_ratio = df['volume'].iloc[i] / df['volume'].iloc[i - 3:i].mean()
+
+        # 价格波动检测
+        price_change = abs(df['close'].iloc[i] - df['close'].iloc[i - 1])
+        atr_ratio = price_change / atr[i] if atr[i] > 0 else 0
+
+        # 震荡验证
+        is_consolidation = all(
+            abs(df['high'].iloc[j] - df['low'].iloc[j]) < 0.5 * atr[j]
+            for j in range(i - consolidation_bars + 1, i + 1)
+        )
+
+        if (vol_ratio > volume_threshold and
+                atr_ratio < price_deviation and
+                is_consolidation):
+            block_type = "bid" if df['close'].iloc[i] > df['open'].iloc[i] else "ask"
+            order_blocks.append({
+                'index': i,
+                'price': df['close'].iloc[i],
+                'type': block_type,
+                'strength': vol_ratio * (1 - atr_ratio)
+            })
+
+    # 趋势过滤：仅保留与当前趋势同向的订单块
+    trend, _, _ = get_smc_trend_and_duration(df)
+    return [b for b in order_blocks if
+            (trend == 'UP' and b['type'] == 'bid') or
+            (trend == 'DOWN' and b['type'] == 'ask')]
+
+
 def find_swing_points(df: pd.DataFrame, window=3):
-    """
-    改进摆动点识别，增加窗口参数以平滑噪声
+        """
+        改进摆动点识别，增加窗口参数以平滑噪声
 
-    参数:
-        df: 包含OHLC数据的DataFrame
-        window: 寻找摆动点的窗口大小
+        参数:
+            df: 包含OHLC数据的DataFrame
+            window: 寻找摆动点的窗口大小
 
-    返回:
-        swing_highs: 摆动高点列表
-        swing_lows: 摆动低点列表
-    """
-    swing_highs = []
-    swing_lows = []
+        返回:
+            swing_highs: 摆动高点列表
+            swing_lows: 摆动低点列表
+        """
+        swing_highs = []
+        swing_lows = []
 
-    if len(df) <= 2 * window:
-        indicators_logger.warning(f"数据长度 {len(df)} 不足以找到摆动点 (需要 > {2 * window})")
-        print_colored(f"⚠️ 数据长度 {len(df)} 不足以找到摆动点", Colors.WARNING)
-        return swing_highs, swing_lows
+        if len(df) <= 2 * window:
+            indicators_logger.warning(f"数据长度 {len(df)} 不足以找到摆动点 (需要 > {2 * window})")
+            print_colored(f"⚠️ 数据长度 {len(df)} 不足以找到摆动点", Colors.WARNING)
+            return swing_highs, swing_lows
 
-    try:
-        for i in range(window, len(df) - window):
-            # 摆动高点：当前高点大于前后window根K线的高点
-            if all(df['high'].iloc[i] > df['high'].iloc[j] for j in range(i - window, i)) and \
-                    all(df['high'].iloc[i] > df['high'].iloc[j] for j in range(i + 1, i + window + 1)):
-                swing_highs.append(df['high'].iloc[i])
-                print_colored(f"发现摆动高点: 索引={i}, 价格={df['high'].iloc[i]:.4f}", Colors.INFO)
-
-            # 摆动低点：当前低点小于前后window根K线的低点
-            if all(df['low'].iloc[i] < df['low'].iloc[j] for j in range(i - window, i)) and \
-                    all(df['low'].iloc[i] < df['low'].iloc[j] for j in range(i + 1, i + window + 1)):
-                swing_lows.append(df['low'].iloc[i])
-                print_colored(f"发现摆动低点: 索引={i}, 价格={df['low'].iloc[i]:.4f}", Colors.INFO)
-
-        # 如果没有找到任何摆动点，使用简化的算法
-        if not swing_highs or not swing_lows:
-            print_colored("使用简化算法寻找摆动点", Colors.INFO)
-            window = max(2, window // 2)  # 缩小窗口
-
+        try:
             for i in range(window, len(df) - window):
-                # 简化版摆动高点
-                if df['high'].iloc[i] == max(df['high'].iloc[i - window:i + window + 1]):
+                # 摆动高点：当前高点大于前后window根K线的高点
+                if all(df['high'].iloc[i] > df['high'].iloc[j] for j in range(i - window, i)) and \
+                        all(df['high'].iloc[i] > df['high'].iloc[j] for j in range(i + 1, i + window + 1)):
                     swing_highs.append(df['high'].iloc[i])
-                    print_colored(f"简化算法发现高点: 索引={i}, 价格={df['high'].iloc[i]:.4f}", Colors.INFO)
+                    print_colored(f"发现摆动高点: 索引={i}, 价格={df['high'].iloc[i]:.4f}", Colors.INFO)
 
-                # 简化版摆动低点
-                if df['low'].iloc[i] == min(df['low'].iloc[i - window:i + window + 1]):
+                # 摆动低点：当前低点小于前后window根K线的低点
+                if all(df['low'].iloc[i] < df['low'].iloc[j] for j in range(i - window, i)) and \
+                        all(df['low'].iloc[i] < df['low'].iloc[j] for j in range(i + 1, i + window + 1)):
                     swing_lows.append(df['low'].iloc[i])
-                    print_colored(f"简化算法发现低点: 索引={i}, 价格={df['low'].iloc[i]:.4f}", Colors.INFO)
+                    print_colored(f"发现摆动低点: 索引={i}, 价格={df['low'].iloc[i]:.4f}", Colors.INFO)
 
-        print_colored(f"找到 {len(swing_highs)} 个摆动高点和 {len(swing_lows)} 个摆动低点", Colors.INFO)
-        return swing_highs, swing_lows
-    except Exception as e:
-        indicators_logger.error(f"寻找摆动点失败: {e}")
-        print_colored(f"❌ 寻找摆动点失败: {e}", Colors.ERROR)
-        return [], []
+            # 如果没有找到任何摆动点，使用简化的算法
+            if not swing_highs or not swing_lows:
+                print_colored("使用简化算法寻找摆动点", Colors.INFO)
+                window = max(2, window // 2)  # 缩小窗口
+
+                for i in range(window, len(df) - window):
+                    # 简化版摆动高点
+                    if df['high'].iloc[i] == max(df['high'].iloc[i - window:i + window + 1]):
+                        swing_highs.append(df['high'].iloc[i])
+                        print_colored(f"简化算法发现高点: 索引={i}, 价格={df['high'].iloc[i]:.4f}", Colors.INFO)
+
+                    # 简化版摆动低点
+                    if df['low'].iloc[i] == min(df['low'].iloc[i - window:i + window + 1]):
+                        swing_lows.append(df['low'].iloc[i])
+                        print_colored(f"简化算法发现低点: 索引={i}, 价格={df['low'].iloc[i]:.4f}", Colors.INFO)
+
+            print_colored(f"找到 {len(swing_highs)} 个摆动高点和 {len(swing_lows)} 个摆动低点", Colors.INFO)
+            return swing_highs, swing_lows
+        except Exception as e:
+            indicators_logger.error(f"寻找摆动点失败: {e}")
+            print_colored(f"❌ 寻找摆动点失败: {e}", Colors.ERROR)
+            return [], []
+
 
 
 def calculate_fibonacci_retracements(df: pd.DataFrame):
@@ -1229,7 +1229,7 @@ def calculate_optimized_indicators(df: pd.DataFrame, btc_df=None):
                 print_colored(f"市场情绪: 中性 (0.0，无BTC数据)", Colors.INFO)
                 print_colored(f"恐慌指数: 5.00/10 (默认值，无ATR和BTC数据)", Colors.INFO)
 
-            # 检查关键指标是否计算成功
+        # 检查关键指标是否计算成功
         missing_critical = [indicator for indicator in critical_indicators if
                             indicator not in df.columns or df[indicator].isna().all()]
         if missing_critical:
@@ -1245,7 +1245,88 @@ def calculate_optimized_indicators(df: pd.DataFrame, btc_df=None):
 
         print_colored(f"✅ 所有指标计算完成，总计 {len(all_indicators)} 个指标", Colors.GREEN + Colors.BOLD)
         return df
+
     except Exception as e:
         print_colored(f"❌ 计算优化指标失败: {e}", Colors.ERROR)
         indicators_logger.error(f"计算优化指标失败: {e}")
         return pd.DataFrame()
+
+
+def wait_for_entry_timing(self, symbol, score, amount):
+        """
+        监控最佳入场时机，通过小幅波动和技术突破确定
+
+        参数:
+            self: 交易机器人实例
+            symbol: 交易对
+            score: 质量评分
+            amount: 交易金额
+
+        返回:
+            适合入场的布尔值
+        """
+        # 预先验证数据和计算指标
+        df = self.get_historical_data_with_cache(symbol, force_refresh=True)
+        if df is None or df.empty:
+            return False
+
+        df = calculate_optimized_indicators(df)
+        if df is None or df.empty:
+            return False
+
+        try:
+            # 获取当前价格
+            ticker = self.client.futures_symbol_ticker(symbol=symbol)
+            current_price = float(ticker['price'])
+
+            # 趋势分析
+            trend, duration, trend_info = get_smc_trend_and_duration(df, None, self.logger)
+
+            # 关键判断因素1：价格是否在支撑位附近
+            swing_highs, swing_lows = find_swing_points(df)
+            fib_levels = calculate_fibonacci_retracements(df)
+
+            # 支撑位检测
+            is_near_support = False
+            for low in swing_lows:
+                if abs(current_price - low) / current_price < 0.01:  # 1%内
+                    is_near_support = True
+                    break
+
+            # 关键判断因素2：成交量是否有效
+            recent_volume = df['volume'].iloc[-1]
+            volume_mean = df['volume'].rolling(10).mean().iloc[-1]
+            volume_ratio = recent_volume / volume_mean if volume_mean > 0 else 0
+
+            # 关键判断因素3：价格突破
+            bbw = ((df['BB_Upper'].iloc[-1] - df['BB_Lower'].iloc[-1]) / df['BB_Middle'].iloc[-1]) if all(
+                col in df.columns for col in ['BB_Upper', 'BB_Lower', 'BB_Middle']) else 0.1
+            price_breakout = False
+
+            # 检查布林带突破
+            if 'BB_Lower' in df.columns and 'BB_Upper' in df.columns:
+                bb_lower = df['BB_Lower'].iloc[-1]
+                bb_upper = df['BB_Upper'].iloc[-1]
+                if current_price < bb_lower * 0.99 or current_price > bb_upper * 1.01:
+                    price_breakout = True
+
+            # 判定入场时机
+            if trend != "NEUTRAL" and score >= 7.0 and is_near_support and volume_ratio > 1.2:
+                self.logger.info(f"{symbol} 处于支撑位且成交量放大，是良好入场点")
+                return True
+            elif trend != "NEUTRAL" and score >= 6.0 and price_breakout and volume_ratio > 1.0:
+                self.logger.info(f"{symbol} 价格突破且成交量有效，是良好入场点")
+                return True
+            elif score >= 8.5:  # 非常高质量的信号
+                self.logger.info(f"{symbol} 极高质量评分 {score:.2f}，是良好入场点")
+                return True
+            elif bbw < 0.03 and 'Supertrend_Direction' in df.columns and df['Supertrend_Direction'].iloc[-1] != 0:
+                # 布林带紧缩后超级趋势确认方向
+                self.logger.info(f"{symbol} 布林带紧缩后超级趋势给出信号，是良好入场点")
+                return True
+            else:
+                # 保持观察
+                return False
+        except Exception as e:
+            self.logger.error(f"{symbol} 等待入场时机判断出错: {e}")
+            return False
