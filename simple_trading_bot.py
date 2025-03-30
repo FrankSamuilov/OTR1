@@ -1269,8 +1269,8 @@ class EnhancedTradingBot:
                 time.sleep(30)
 
 if __name__ == "__main__":
-    API_KEY = "vVqjrSQv15ECZWTXtINNwiZ4AP4k7wHxMmkg3nrParKwJsD2K6MgKgBUJc0u4RIc"
-    API_SECRET = "a3G8a5z6oRSWW8jV15blKRovKnybvtS4FRCUn131mifzlEbQluJUM0llDXzkMY5K"
+    API_KEY = ""
+    API_SECRET = ""
 
     bot = EnhancedTradingBot(API_KEY, API_SECRET, CONFIG)
     bot.trade()
