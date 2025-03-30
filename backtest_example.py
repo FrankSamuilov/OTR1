@@ -1,7 +1,6 @@
 import pandas as pd
 from indicators_module import calculate_optimized_indicators
-from config import Config
-
+from config import CONFIG
 
 class Backtester:
     def __init__(self, data_path):

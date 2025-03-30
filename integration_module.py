@@ -47,6 +47,12 @@ from risk_management import (
     adaptive_risk_management
 )
 
+from entry_timing_module import (
+    calculate_entry_timing,
+    detect_breakout_conditions,
+    estimate_entry_execution_price
+)
+
 
 def calculate_enhanced_indicators(df: pd.DataFrame,
                                   calculate_all: bool = True,
@@ -338,6 +344,7 @@ def generate_trade_recommendation(df: pd.DataFrame, account_balance: float,
         signal = analysis["overall"]["signal"]
         confidence = analysis["overall"]["confidence"]
         quality_score = analysis["overall"]["quality_score"]
+        current_price = analysis["current_price"]
 
         # 如果没有明确信号或质量评分过低，建议避免交易
         if signal == "NEUTRAL" or confidence < 0.3:
@@ -361,7 +368,13 @@ def generate_trade_recommendation(df: pd.DataFrame, account_balance: float,
                 "analysis": analysis
             }
 
-        # 3. 进行风险管理分析
+        # 3. 计算入场时机
+        entry_timing = calculate_entry_timing(df, signal, quality_score, current_price)
+
+        # 4. 检测突破条件
+        breakout = detect_breakout_conditions(df)
+
+        # 5. 进行风险管理分析
         risk_analysis = adaptive_risk_management(df, account_balance, quality_score, signal, leverage)
 
         # 如果风险管理建议避免交易
@@ -370,49 +383,93 @@ def generate_trade_recommendation(df: pd.DataFrame, account_balance: float,
                 "recommendation": risk_analysis["recommendation"],
                 "reason": risk_analysis["recommendation_reason"],
                 "analysis": analysis,
-                "risk": risk_analysis
+                "risk": risk_analysis,
+                "entry_timing": entry_timing
             }
 
-        # 4. 计算最佳持仓时间
+        # 6. 计算最佳持仓时间
         optimal_holding_time = calculate_optimal_holding_time(df, analysis["trend"])
 
-        # 5. 使用多时间框架预测优化入场和出场
+        # 7. 确定入场价格和方式
+        # 优先考虑入场时机建议的价格
+        entry_price = entry_timing["expected_entry_price"]
+        entry_type = entry_timing["entry_type"]
+        should_wait = entry_timing["should_wait"]
+
+        # 如果有突破且方向与信号一致，可能需要调整入场价
+        if breakout["has_breakout"] and ((breakout["direction"] == "UP" and signal == "BUY") or
+                                         (breakout["direction"] == "DOWN" and signal == "SELL")):
+            # 如果是强突破，考虑立即入场
+            if breakout["strength"] > 1.0:
+                entry_timing["immediate_entry"] = True
+                entry_timing["should_wait"] = False
+                entry_timing["entry_type"] = "MARKET"
+                should_wait = False
+                entry_type = "MARKET"
+
+                # 调整入场价考虑市场冲击
+                entry_price = estimate_entry_execution_price(
+                    current_price, signal, "MARKET", market_impact=0.001)
+
+                # 添加突破理由
+                entry_timing["entry_conditions"].append(
+                    f"检测到{breakout['direction']}方向突破: {breakout['description']}")
+
+        # 8. 使用多时间框架预测优化入场和出场
         if "predictions" in analysis and "optimal_trading_zone" in analysis["predictions"]:
             trading_zone = analysis["predictions"]["optimal_trading_zone"]
 
-            # 如果多时间框架预测与信号一致，使用其建议的价格
+            # 如果多时间框架预测与信号一致，使用其建议的止损止盈
             if trading_zone.get("recommendation") == signal:
-                entry_price = trading_zone.get("entry", risk_analysis["entry_price"])
                 stop_loss = trading_zone.get("stop_loss", risk_analysis["stop_loss"])
                 take_profit = trading_zone.get("take_profit", risk_analysis["take_profit"])
             else:
                 # 否则使用风险分析结果
-                entry_price = risk_analysis["entry_price"]
                 stop_loss = risk_analysis["stop_loss"]
                 take_profit = risk_analysis["take_profit"]
         else:
             # 使用风险分析结果
-            entry_price = risk_analysis["entry_price"]
             stop_loss = risk_analysis["stop_loss"]
             take_profit = risk_analysis["take_profit"]
 
-        # 6. 整合所有信息生成最终建议
+        # 9. 计算实际入场价的仓位大小
+        # 如果预期入场价不是当前价，需要调整仓位计算
+        if abs(entry_price - current_price) / current_price > 0.005:
+            # 重新计算仓位大小
+            position_result = calculate_position_size(
+                account_balance,
+                entry_price,
+                stop_loss,
+                risk_analysis["max_risk_percent"],
+                leverage
+            )
+            position_size = position_result["position_size"]
+            position_value = position_result["position_value"]
+        else:
+            position_size = risk_analysis["position_size"]
+            position_value = risk_analysis["position_value"]
+
+        # 10. 整合所有信息生成最终建议
         recommendation = {
-            "recommendation": "EXECUTE",
+            "recommendation": "EXECUTE" if not should_wait or entry_timing["immediate_entry"] else "WAIT",
             "side": signal,
             "confidence": confidence,
             "quality_score": quality_score,
             "entry_price": entry_price,
+            "entry_type": entry_type,
+            "current_price": current_price,
             "stop_loss": stop_loss,
             "take_profit": take_profit,
-            "position_size": risk_analysis["position_size"],
-            "position_value": risk_analysis["position_value"],
+            "position_size": position_size,
+            "position_value": position_value,
             "leverage": leverage,
             "risk_percent": risk_analysis["actual_risk_percent"],
             "risk_level": risk_analysis["risk_level"],
             "optimal_holding_time": optimal_holding_time,
             "trailing_stop": risk_analysis["trailing_stop"],
             "risk_reward_ratio": risk_analysis["risk_reward_ratio"],
+            "entry_timing": entry_timing,
+            "breakout": breakout if breakout["has_breakout"] else None,
             "analysis": analysis,
             "timestamp": time.time()
         }
@@ -421,15 +478,31 @@ def generate_trade_recommendation(df: pd.DataFrame, account_balance: float,
         print_colored("💼 交易建议摘要:", Colors.BLUE + Colors.BOLD)
 
         signal_color = Colors.GREEN if signal == "BUY" else Colors.RED if signal == "SELL" else Colors.GRAY
-        print_colored(f"建议: EXECUTE {signal_color}{signal}{Colors.RESET}", Colors.INFO)
-        print_colored(f"入场价格: {entry_price:.6f}", Colors.INFO)
+        action_text = "立即执行" if recommendation[
+                                        "recommendation"] == "EXECUTE" else f"等待入场 ({entry_timing['expected_entry_minutes']}分钟)"
+
+        print_colored(f"建议: {action_text} {signal_color}{signal}{Colors.RESET}", Colors.INFO)
+        print_colored(f"当前价格: {current_price:.6f}", Colors.INFO)
+        print_colored(f"入场价格: {entry_price:.6f} ({entry_type}单)", Colors.INFO)
+
+        print_colored("入场条件:", Colors.BLUE)
+        for i, condition in enumerate(entry_timing["entry_conditions"], 1):
+            print_colored(f"  {i}. {condition}", Colors.INFO)
+
+        print_colored(f"预计入场时间: {entry_timing['expected_entry_time']}", Colors.INFO)
         print_colored(f"止损价格: {stop_loss:.6f}", Colors.INFO)
         print_colored(f"止盈价格: {take_profit:.6f}", Colors.INFO)
-        print_colored(f"仓位规模: {risk_analysis['position_size']:.6f} 单位", Colors.INFO)
-        print_colored(f"仓位价值: {risk_analysis['position_value']:.2f}", Colors.INFO)
+        print_colored(f"仓位规模: {position_size:.6f} 单位", Colors.INFO)
+        print_colored(f"仓位价值: {position_value:.2f}", Colors.INFO)
         print_colored(f"风险: {risk_analysis['actual_risk_percent']:.2f}%", Colors.INFO)
         print_colored(f"风险回报比: {risk_analysis['risk_reward_ratio']:.2f}", Colors.INFO)
         print_colored(f"最佳持仓时间: {optimal_holding_time}分钟", Colors.INFO)
+
+        if breakout["has_breakout"]:
+            b_color = Colors.GREEN if breakout["direction"] == "UP" else Colors.RED
+            print_colored(
+                f"突破情况: {b_color}{breakout['description']}{Colors.RESET} (强度: {breakout['strength']:.2f})",
+                Colors.INFO)
 
         return recommendation
     except Exception as e:

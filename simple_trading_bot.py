@@ -15,6 +15,17 @@ from logger_setup import get_logger
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from trade_module import get_max_leverage, get_precise_quantity, format_quantity
 from quality_module import calculate_quality_score, detect_pattern_similarity, adjust_quality_for_similarity
+from pivot_points_module import calculate_pivot_points, analyze_pivot_point_strategy
+from advanced_indicators import calculate_smi, calculate_stochastic, calculate_parabolic_sar
+from smc_enhanced_prediction import enhanced_smc_prediction, multi_timeframe_smc_prediction
+from risk_management import adaptive_risk_management
+from integration_module import calculate_enhanced_indicators, comprehensive_market_analysis, generate_trade_recommendation
+from logger_utils import Colors, print_colored
+import datetime
+import time
+from integration_module import calculate_enhanced_indicators, generate_trade_recommendation
+
+
 
 
 class EnhancedTradingBot:
@@ -233,6 +244,101 @@ class EnhancedTradingBot:
             self.logger.error(f"{symbol}生成信号失败: {e}")
             return "HOLD", 0
 
+    def place_hedge_orders(self, symbol, primary_side, quality_score):
+        """
+        根据质量评分和信号放置订单，支持双向持仓 - 更新版本
+
+        参数:
+            symbol: 交易对
+            primary_side: 主要交易方向
+            quality_score: 质量评分
+
+        返回:
+            bool: 是否成功执行订单
+        """
+        account_balance = self.get_futures_balance()
+
+        if account_balance < self.config.get("MIN_MARGIN_BALANCE", 10):
+            self.logger.warning(f"账户余额不足，无法交易: {account_balance} USDC")
+            return False
+
+        # 检查当前持仓
+        total_exposure, symbol_exposures = get_total_position_exposure(self.open_positions, account_balance)
+        symbol_exposure = symbol_exposures.get(symbol, 0)
+
+        print(f"📊 账户余额: {account_balance} USDC")
+        print(f"📊 总持仓比例: {total_exposure:.2f}%, {symbol}持仓比例: {symbol_exposure:.2f}%")
+
+        # 计算下单金额 - 这里传递symbol参数，用于高价值货币特殊处理
+        order_amount, order_pct = calculate_order_amount(
+            account_balance,
+            symbol_exposure,
+            symbol=symbol,  # 传递symbol参数
+            max_total_exposure=85,
+            max_symbol_exposure=15,
+            default_order_pct=5
+        )
+
+        if order_amount <= 0:
+            self.logger.warning(f"{symbol}下单金额过小或超出限额")
+            return False
+
+        # 双向持仓模式
+        if primary_side == "BOTH":
+            # 质量评分在中间区域时采用双向持仓
+            if 4.0 <= quality_score <= 6.0:
+                # 使用6:4比例分配多空仓位
+                long_ratio = 0.6
+                short_ratio = 0.4
+
+                long_amount = order_amount * long_ratio
+                short_amount = order_amount * short_ratio
+
+                print(
+                    f"🔄 执行双向持仓 - 多头: {long_amount:.2f} USDC ({long_ratio * 100:.0f}%), 空头: {short_amount:.2f} USDC ({short_ratio * 100:.0f}%)")
+
+                # 计算每个方向的杠杆 (可以根据方向不同使用不同杠杆)
+                long_leverage = self.calculate_leverage_from_quality(quality_score)
+                short_leverage = max(1, long_leverage - 2)  # 空头杠杆略低以降低风险
+
+                # 先执行多头订单
+                long_success = self.place_futures_order_usdc(symbol, "BUY", long_amount, long_leverage)
+
+                # 添加小延迟避免API限制
+                time.sleep(1)
+
+                # 再执行空头订单
+                short_success = self.place_futures_order_usdc(symbol, "SELL", short_amount, short_leverage)
+
+                if long_success and short_success:
+                    self.logger.info(f"{symbol}双向持仓成功", extra={
+                        "long_amount": long_amount,
+                        "short_amount": short_amount,
+                        "quality_score": quality_score
+                    })
+                    return True
+                else:
+                    self.logger.warning(f"{symbol}双向持仓部分失败", extra={
+                        "long_success": long_success,
+                        "short_success": short_success
+                    })
+                    return long_success or short_success
+            else:
+                # 偏向某一方向
+                side = "BUY" if quality_score > 5.0 else "SELL"
+                leverage = self.calculate_leverage_from_quality(quality_score)
+                print(f"🎯 根据质量评分 {quality_score:.2f} 执行单向交易: {side}")
+                return self.place_futures_order_usdc(symbol, side, order_amount, leverage)
+
+        elif primary_side in ["BUY", "SELL"]:
+            # 根据评分调整杠杆倍数
+            leverage = self.calculate_leverage_from_quality(quality_score)
+            print(f"🎯 执行{primary_side}交易，杠杆: {leverage}倍")
+            return self.place_futures_order_usdc(symbol, primary_side, order_amount, leverage)
+        else:
+            self.logger.warning(f"{symbol}未知交易方向: {primary_side}")
+            return False
+
     def is_near_support(self, price, swing_lows, fib_levels, threshold=0.01):
         """检查价格是否接近支撑位"""
         # 检查摆动低点
@@ -392,100 +498,207 @@ class EnhancedTradingBot:
         else:
             return 2  # 默认低杠杆
 
-    def place_futures_order_usdc(self, symbol, side, amount, leverage=5):
-        """执行期货市场订单"""
-        try:
-            # 查询当前市场价格
-            ticker = self.client.futures_symbol_ticker(symbol=symbol)
-            current_price = float(ticker['price'])
-            raw_qty = amount / current_price
+    def place_futures_order_usdc(self, symbol: str, side: str, amount: float, leverage: int = 5) -> bool:
+        """
+        执行期货市场订单 - 简化版，移除保证金检查
 
-            # 处理步长精度
+        参数:
+            symbol: 交易对
+            side: 交易方向 ('BUY' 或 'SELL')
+            amount: 交易金额(USDC)
+            leverage: 杠杆倍数
+
+        返回:
+            bool: 是否成功执行订单
+        """
+        import math
+        import time
+        from logger_utils import Colors, print_colored
+
+        try:
+            # 获取交易对信息 (精度、限制等)
             info = self.client.futures_exchange_info()
+
             step_size = None
             min_qty = None
+            notional_min = None
 
+            # 查找该交易对的所有过滤器
             for item in info['symbols']:
                 if item['symbol'] == symbol:
                     for f in item['filters']:
+                        # 数量精度
                         if f['filterType'] == 'LOT_SIZE':
                             step_size = float(f['stepSize'])
                             min_qty = float(f['minQty'])
-                            break
+                            max_qty = float(f['maxQty'])
+                        # 最小订单价值
+                        elif f['filterType'] == 'MIN_NOTIONAL':
+                            notional_min = float(f.get('notional', 0))
                     break
 
+            # 确保找到了必要的信息
             if step_size is None:
-                self.logger.warning(f"无法获取{symbol}的步长信息")
+                print_colored(f"❌ {symbol} 无法获取交易精度信息", Colors.ERROR)
                 return False
 
+            # 获取当前价格
+            ticker = self.client.futures_symbol_ticker(symbol=symbol)
+            current_price = float(ticker['price'])
+
+            # 计算数量并应用精度限制
+            raw_qty = amount / current_price
+
+            # 应用数量精度
             precision = int(round(-math.log(step_size, 10), 0))
-            qty = get_precise_quantity(self.client, symbol, raw_qty)
-            qty_str = format_quantity(qty, precision)
-            qty = float(qty_str)
+            quantity = math.floor(raw_qty * 10 ** precision) / 10 ** precision
 
-            # 检查最小交易量
-            if qty < min_qty:
-                self.logger.warning(f"{symbol}数量{qty}小于最小交易量{min_qty}")
-                return False
+            # 确保数量>=最小数量
+            if quantity < min_qty:
+                print_colored(
+                    f"⚠️ {symbol} 数量 {quantity} 小于最小交易量 {min_qty}，已调整",
+                    Colors.WARNING
+                )
+                quantity = min_qty
 
-            # 尝试调整杠杆
+            # 格式化为字符串(避免科学计数法问题)
+            qty_str = f"{quantity:.{precision}f}"
+
+            # 检查最小订单价值
+            notional = quantity * current_price
+            if notional_min and notional < notional_min:
+                print_colored(
+                    f"⚠️ {symbol} 订单价值 ({notional:.2f}) 低于最小要求 ({notional_min})，已调整",
+                    Colors.WARNING
+                )
+                new_qty = math.ceil(notional_min / current_price * 10 ** precision) / 10 ** precision
+                quantity = max(min_qty, new_qty)
+                qty_str = f"{quantity:.{precision}f}"
+                notional = quantity * current_price
+
+            print_colored(
+                f"🔢 {symbol} 计划交易: 金额={amount:.2f} USDC, 数量={quantity}, 价格={current_price}",
+                Colors.INFO
+            )
+
+            # 设置杠杆
             try:
-                # 获取最大允许杠杆
-                max_leverage = get_max_leverage(self.client, symbol, max_allowed=20)
-                leverage = min(leverage, max_leverage)
-
-                attempt = 0
-                while attempt < 3 and leverage >= 1:
+                # 尝试设置杠杆
+                retry_count = 0
+                while retry_count < 3:
                     try:
-                        self.client.futures_change_leverage(symbol=symbol, leverage=leverage)
+                        self.client.futures_change_leverage(
+                            symbol=symbol,
+                            leverage=leverage
+                        )
                         break
-                    except Exception as e:
-                        if "leverage not valid" in str(e).lower():
-                            leverage -= 1
-                            attempt += 1
+                    except Exception as le:
+                        le_msg = str(le).lower()
+                        if "leverage not valid" in le_msg or "invalid leverage" in le_msg:
+                            # 降低杠杆并重试
+                            leverage = max(1, leverage - 1)
+                            print_colored(
+                                f"⚠️ {symbol} 杠杆 {leverage + 1} 无效，尝试降低至 {leverage}",
+                                Colors.WARNING
+                            )
+                            retry_count += 1
                         else:
-                            raise e
+                            # 其他错误，向上抛出
+                            raise le
 
-                if leverage < 1:
-                    self.logger.warning(f"{symbol}杠杆调整失败，使用默认杠杆1")
+                if retry_count >= 3:
+                    print_colored(
+                        f"⚠️ {symbol} 无法设置有效杠杆，使用默认杠杆 1",
+                        Colors.WARNING
+                    )
                     leverage = 1
+                    self.client.futures_change_leverage(
+                        symbol=symbol,
+                        leverage=leverage
+                    )
+
             except Exception as e:
-                self.logger.warning(f"设置{symbol}杠杆失败: {e}")
+                # 杠杆设置失败，但不要中止交易
+                print_colored(
+                    f"⚠️ {symbol} 设置杠杆失败: {e}，使用默认杠杆 1",
+                    Colors.WARNING
+                )
                 leverage = 1
 
             # 执行交易
-            if self.hedge_mode_enabled:
-                pos_side = "LONG" if side.upper() == "BUY" else "SHORT"
-                order = self.client.futures_create_order(
-                    symbol=symbol,
-                    side=side,
-                    type="MARKET",
-                    quantity=str(qty),
-                    positionSide=pos_side
+            try:
+                # 根据交易所支持，决定是否使用对冲模式
+                if hasattr(self, 'hedge_mode_enabled') and self.hedge_mode_enabled:
+                    # 双向持仓模式
+                    pos_side = "LONG" if side.upper() == "BUY" else "SHORT"
+                    order = self.client.futures_create_order(
+                        symbol=symbol,
+                        side=side,
+                        type="MARKET",
+                        quantity=qty_str,
+                        positionSide=pos_side
+                    )
+                else:
+                    # 单向持仓模式
+                    order = self.client.futures_create_order(
+                        symbol=symbol,
+                        side=side,
+                        type="MARKET",
+                        quantity=qty_str
+                    )
+
+                # 订单成功
+                print_colored(
+                    f"✅ {side} {symbol} 成功, 数量={quantity}, 杠杆={leverage}倍",
+                    Colors.GREEN
                 )
-            else:
-                order = self.client.futures_create_order(
-                    symbol=symbol,
-                    side=side,
-                    type="MARKET",
-                    quantity=str(qty)
+
+                # 记录订单信息到日志
+                self.logger.info(f"{symbol} {side} 订单成功", extra={
+                    "order_id": order.get("orderId", "unknown"),
+                    "quantity": quantity,
+                    "notional": notional,
+                    "leverage": leverage
+                })
+
+                # 记录持仓信息
+                self.record_open_position(
+                    symbol,
+                    side,
+                    current_price,
+                    quantity
                 )
 
-            # 记录订单信息
-            self.logger.info(f"{symbol} {side} 订单执行成功", extra={
-                "amount": amount,
-                "quantity": qty,
-                "leverage": leverage,
-                "price": current_price,
-                "order_id": order.get("orderId", "unknown")
-            })
+                return True
 
-            # 更新持仓记录
-            self.record_open_position(symbol, side, current_price, qty)
+            except Exception as e:
+                order_error = str(e)
+                print_colored(
+                    f"❌ {symbol} {side} 订单执行失败: {order_error}",
+                    Colors.ERROR
+                )
 
-            return True
+                # 分析常见错误原因
+                if "insufficient balance" in order_error.lower():
+                    print_colored(f"  原因: 账户余额不足", Colors.WARNING)
+                elif "precision" in order_error.lower():
+                    print_colored(f"  原因: 价格或数量精度不正确", Colors.WARNING)
+                elif "lot size" in order_error.lower():
+                    print_colored(f"  原因: 订单大小不符合要求", Colors.WARNING)
+                elif "min notional" in order_error.lower():
+                    print_colored(f"  原因: 订单价值低于最小要求", Colors.WARNING)
+                elif "rate limit" in order_error.lower():
+                    print_colored(f"  原因: API请求频率过高，将自动延迟重试", Colors.WARNING)
+                    time.sleep(1)  # 添加延迟
+                    return self.place_futures_order_usdc(symbol, side, amount, leverage)
+
+                self.logger.error(f"{symbol} {side} 交易失败", extra={"error": order_error})
+                return False
+
         except Exception as e:
-            self.logger.error(f"{symbol} {side} 订单执行失败: {e}")
+            # 捕获所有其他异常
+            print_colored(f"❌ {symbol} {side} 交易过程中发生错误: {e}", Colors.ERROR)
+            self.logger.error(f"{symbol} 交易错误", extra={"error": str(e)})
             return False
 
     def record_open_position(self, symbol, side, entry_price, quantity):
@@ -830,9 +1043,15 @@ class EnhancedTradingBot:
         print("-" * 50)
 
     def trade(self):
-        """主交易循环"""
-        print("启动交易机器人...")
-        self.logger.info("交易机器人启动", extra={"version": VERSION})
+        """主交易循环 - 增强版"""
+        # 导入必要的模块
+        from logger_utils import Colors, print_colored
+        import datetime
+        import time
+        from integration_module import calculate_enhanced_indicators, generate_trade_recommendation
+
+        print("启动增强版交易机器人...")
+        self.logger.info("增强版交易机器人启动", extra={"version": VERSION})
 
         while True:
             try:
@@ -857,95 +1076,183 @@ class EnhancedTradingBot:
                 # 管理现有持仓
                 self.manage_open_positions()
 
-                # 获取和分析所有交易对
+                # 分析所有交易对并生成建议
                 trade_candidates = []
                 for symbol in self.config["TRADE_PAIRS"]:
                     try:
+                        print(f"\n分析交易对: {symbol}")
+                        # 获取历史数据
                         df = self.get_historical_data_with_cache(symbol)
                         if df is None:
+                            print(f"❌ 无法获取{symbol}数据")
                             continue
 
-                        signal, quality_score = self.generate_trade_signal(df, symbol)
+                        # 计算所有增强指标
+                        df = calculate_enhanced_indicators(df)
+                        if df is None or df.empty:
+                            print(f"❌ {symbol}指标计算失败")
+                            continue
 
                         # 获取当前价格
                         try:
                             ticker = self.client.futures_symbol_ticker(symbol=symbol)
                             current_price = float(ticker['price'])
-                        except:
-                            self.logger.warning(f"获取{symbol}价格失败")
+                        except Exception as e:
+                            print(f"❌ 获取{symbol}价格失败: {e}")
                             continue
 
-                        # 预测价格
-                        predicted_price = self.predict_short_term_price(symbol)
+                        # 生成交易建议（包含全部分析和入场逻辑）
+                        leverage = self.calculate_leverage_from_quality(7.0)  # 默认使用适中杠杆
+                        recommendation = generate_trade_recommendation(df, account_balance, leverage)
 
-                        # 计算下单金额
-                        total_exposure, symbol_exposures = get_total_position_exposure(self.open_positions,
-                                                                                       account_balance)
-                        symbol_exposure = symbol_exposures.get(symbol, 0)
-                        order_amount, _ = calculate_order_amount(account_balance, symbol_exposure)
+                        # 检查是否有建议
+                        if "error" in recommendation:
+                            print(f"❌ {symbol}分析出错: {recommendation['error']}")
+                            continue
 
-                        if signal != "HOLD" and order_amount > 0:
-                            trade_candidates.append({
-                                "symbol": symbol,
-                                "signal": signal,
-                                "quality_score": quality_score,
-                                "current_price": current_price,
-                                "predicted_price": predicted_price,
-                                "order_amount": order_amount
-                            })
+                        # 添加交易对信息
+                        recommendation["symbol"] = symbol
+
+                        # 只有执行或等待的建议才添加到候选列表
+                        if recommendation["recommendation"] in ["EXECUTE", "WAIT"]:
+                            trade_candidates.append(recommendation)
+
                     except Exception as e:
                         self.logger.error(f"处理{symbol}时出错: {e}")
+                        print(f"❌ 处理{symbol}时出错: {e}")
 
-                # 排序候选交易
+                # 按质量评分排序候选交易
                 trade_candidates.sort(key=lambda x: x["quality_score"], reverse=True)
 
-                # 显示交易计划
+                # 显示详细交易计划
                 if trade_candidates:
-                    print("\n==== 交易计划 ====")
-                    print(f"{'交易对':<10} {'信号':<6} {'质量评分':<10} {'当前价':<10} {'预测价':<10}")
-                    print("-" * 50)
+                    print("\n==== 详细交易计划 ====")
+                    for idx, candidate in enumerate(trade_candidates, 1):
+                        symbol = candidate["symbol"]
+                        action = candidate["recommendation"]
+                        side = candidate["side"]
+                        quality = candidate["quality_score"]
 
-                    for candidate in trade_candidates:
+                        # 显示颜色
+                        side_color = Colors.GREEN if side == "BUY" else Colors.RED
+                        action_color = Colors.GREEN if action == "EXECUTE" else Colors.YELLOW
+
                         print(
-                            f"{candidate['symbol']:<10} {candidate['signal']:<6} {candidate['quality_score']:<10.2f} {candidate['current_price']:<10.4f} {candidate['predicted_price']:<10.4f}")
+                            f"\n{idx}. {symbol} - {action_color}{action}{Colors.RESET} {side_color}{side}{Colors.RESET} (评分: {quality:.2f}/10)")
 
-                    print("-" * 50)
+                        # 显示价格信息
+                        current = candidate["current_price"]
+                        entry = candidate["entry_price"]
+                        stop = candidate["stop_loss"]
+                        take = candidate["take_profit"]
+
+                        print(f"   当前价: {current:.6f}  入场价: {entry:.6f}")
+                        print(f"   止损价: {stop:.6f}  止盈价: {take:.6f}")
+
+                        # 显示入场时间和条件
+                        if "entry_timing" in candidate:
+                            entry_time = candidate["entry_timing"]["expected_entry_time"]
+                            conditions = candidate["entry_timing"]["entry_conditions"]
+                            print(f"   入场时间: {entry_time}")
+                            print(f"   入场条件: {conditions[0]}" + (f"..." if len(conditions) > 1 else ""))
+
+                        # 显示风险信息
+                        risk = candidate["risk_percent"]
+                        rr = candidate["risk_reward_ratio"]
+                        print(f"   风险: {risk:.2f}%  风险回报比: {rr:.2f}")
+
+                        # 显示突破信息
+                        if candidate.get("breakout") and candidate["breakout"].get("has_breakout"):
+                            breakout = candidate["breakout"]
+                            b_dir = breakout["direction"]
+                            b_desc = breakout["description"]
+                            b_color = Colors.GREEN if b_dir == "UP" else Colors.RED
+                            print(f"   突破: {b_color}{b_desc}{Colors.RESET}")
                 else:
-                    print("本轮无交易候选")
+                    print("\n本轮无交易候选")
 
                 # 执行交易
                 executed_count = 0
+                waiting_count = 0
                 max_trades = min(self.config.get("MAX_PURCHASES_PER_ROUND", 3), len(trade_candidates))
 
-                for i, candidate in enumerate(trade_candidates):
+                for candidate in trade_candidates:
                     if executed_count >= max_trades:
                         break
 
                     symbol = candidate["symbol"]
-                    signal = candidate["signal"]
+                    action = candidate["recommendation"]
+                    side = candidate["side"]
                     quality_score = candidate["quality_score"]
 
-                    # 高评分智能交易
-                    if quality_score >= 7.0 or (signal == "BOTH" and quality_score >= 4.0):
-                        print(f"尝试交易 {symbol}, 信号: {signal}, 质量评分: {quality_score:.2f}")
+                    if action == "EXECUTE":
+                        # 立即执行交易
+                        print(f"\n🚀 立即执行 {symbol} {side} 交易，质量评分: {quality_score:.2f}")
 
-                        if self.place_hedge_orders(symbol, signal, quality_score):
+                        # 准备交易参数
+                        entry_price = candidate["entry_price"]
+                        position_size = candidate["position_size"]
+                        leverage = candidate["leverage"]
+
+                        # 执行交易
+                        success = self.place_futures_order_usdc(
+                            symbol, side, position_size * entry_price, leverage
+                        )
+
+                        if success:
                             executed_count += 1
-                            print(f"✅ {symbol} {signal} 交易成功")
-                        else:
-                            print(f"❌ {symbol} {signal} 交易失败")
+                            print(f"✅ {symbol} {side} 交易执行成功")
 
-                    # 特别提示高质量机会
-                    if quality_score >= 9.0:
-                        high_quality_msg = f"⭐ {symbol} 质量评分极高 ({quality_score:.2f})，建议手动关注"
+                            # 记录止损止盈（如果系统支持）
+                            if hasattr(self, 'set_stop_loss_take_profit'):
+                                self.set_stop_loss_take_profit(
+                                    symbol,
+                                    candidate["stop_loss"],
+                                    candidate["take_profit"]
+                                )
+                        else:
+                            print(f"❌ {symbol} {side} 交易执行失败")
+
+                    elif action == "WAIT" and waiting_count < max_trades:
+                        # 处理等待入场的交易
+                        waiting_count += 1
+                        entry_timing = candidate["entry_timing"]
+                        entry_type = entry_timing.get("entry_type", "LIMIT")
+                        expected_price = candidate["entry_price"]
+                        expected_time = entry_timing["expected_entry_time"]
+
+                        print(f"\n⏳ 等待 {symbol} 达到入场条件")
+                        print(f"   预期入场价格: {expected_price:.6f}")
+                        print(f"   预计入场时间: {expected_time}")
+                        print(f"   入场条件: {entry_timing['entry_conditions'][0]}")
+
+                        # 如果系统支持设置限价单，可以在这里添加代码
+                        if entry_type == "LIMIT" and hasattr(self, 'place_limit_order'):
+                            self.place_limit_order(
+                                symbol,
+                                side,
+                                expected_price,
+                                candidate["position_size"],
+                                candidate["leverage"]
+                            )
+
+                # 特别提示高质量机会
+                for candidate in trade_candidates:
+                    if candidate["quality_score"] >= 9.0:
+                        symbol = candidate["symbol"]
+                        high_quality_msg = f"⭐ {symbol} 质量评分极高 ({candidate['quality_score']:.2f})，建议手动关注"
                         print(high_quality_msg)
                         self.logger.info(high_quality_msg)
 
-                # 显示质量评分排名
-                self.display_quality_scores()
-
                 # 显示持仓卖出预测
                 self.display_position_sell_timing()
+
+                # 统计本轮交易情况
+                print(f"\n==== 本轮交易统计 ====")
+                print(f"分析交易对: {len(self.config['TRADE_PAIRS'])}个")
+                print(f"交易候选: {len(trade_candidates)}个")
+                print(f"执行交易: {executed_count}个")
+                print(f"等待入场: {waiting_count}个")
 
                 # 循环间隔
                 sleep_time = 60
@@ -961,10 +1268,9 @@ class EnhancedTradingBot:
                 print(f"错误: {e}")
                 time.sleep(30)
 
-
 if __name__ == "__main__":
-    API_KEY = ""
-    API_SECRET = ""
+    API_KEY = "vVqjrSQv15ECZWTXtINNwiZ4AP4k7wHxMmkg3nrParKwJsD2K6MgKgBUJc0u4RIc"
+    API_SECRET = "a3G8a5z6oRSWW8jV15blKRovKnybvtS4FRCUn131mifzlEbQluJUM0llDXzkMY5K"
 
     bot = EnhancedTradingBot(API_KEY, API_SECRET, CONFIG)
     bot.trade()

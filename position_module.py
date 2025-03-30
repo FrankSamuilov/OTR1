@@ -88,14 +88,17 @@ def get_total_position_exposure(positions, account_balance):
 
     return total_exposure, symbol_exposures
 
-def calculate_order_amount(account_balance, symbol_exposure, max_total_exposure=85, max_symbol_exposure=15,
+
+def calculate_order_amount(account_balance, symbol_exposure, symbol=None,
+                           max_total_exposure=85, max_symbol_exposure=15,
                            default_order_pct=5):
     """
-    计算适当的下单金额，确保不超过账户和单一货币的敞口限制
+    计算适当的下单金额，考虑高价值货币的特殊处理
 
     参数:
         account_balance: 账户总余额
         symbol_exposure: 当前交易对的持仓占比（百分比）
+        symbol: 交易对名称，用于识别高价值货币
         max_total_exposure: 最大总持仓比例（默认85%）
         max_symbol_exposure: 单一货币最大持仓比例（默认15%）
         default_order_pct: 默认下单比例（账户的5%）
@@ -104,8 +107,22 @@ def calculate_order_amount(account_balance, symbol_exposure, max_total_exposure=
         order_amount: 建议下单金额
         order_pct: 实际下单比例
     """
+    # 确保账户有余额
+    if account_balance <= 0:
+        print(f"⚠️ 账户余额为零，无法下单")
+        return 0, 0
+
+    # 高价值货币使用更小的下单比例
+    high_value_symbols = ['BTCUSDT', 'ETHUSDT', 'PAXGUSDT', 'WBTCUSDT', 'WETHUSDT']
+    if symbol in high_value_symbols:
+        adjusted_order_pct = 1.0  # 对高价值货币使用1%而不是5%
+        print(f"📉 {symbol}是高价值货币，下单比例调整为{adjusted_order_pct}%（默认{default_order_pct}%）")
+    else:
+        adjusted_order_pct = default_order_pct
+
     # 默认下单金额
-    target_amount = account_balance * (default_order_pct / 100)
+    target_amount = account_balance * (adjusted_order_pct / 100)
+    print(f"📊 目标下单金额: {target_amount:.2f} USDC ({adjusted_order_pct}% 账户余额)")
 
     # 检查是否会超过单一货币限制
     remaining_symbol_exposure = max_symbol_exposure - symbol_exposure
@@ -114,20 +131,32 @@ def calculate_order_amount(account_balance, symbol_exposure, max_total_exposure=
     # 如果剩余额度不足，调整下单金额
     if target_amount > max_symbol_amount:
         if max_symbol_amount <= 0:
-            return 0, 0  # 已达到该币种限制
+            # 已达到该币种限制
+            print(f"⚠️ {symbol}敞口已达到上限 {max_symbol_exposure}%，无法下单")
+            return 0, 0
+
+        # 调整为最大可用金额
         order_amount = max_symbol_amount
         order_pct = remaining_symbol_exposure
+        print(f"⚠️ 调整下单比例：从 {adjusted_order_pct}% 减少至 {order_pct:.2f}%")
     else:
         order_amount = target_amount
-        order_pct = default_order_pct
+        order_pct = adjusted_order_pct
 
     # 确保有足够的金额但不会太小
-    if order_amount < 10:  # 最小下单额10美元
-        if max_symbol_amount >= 10:
-            order_amount = 10
+    min_order_amount = 5  # 降低最小下单额至5美元
+    if order_amount < min_order_amount:
+        if max_symbol_amount >= min_order_amount:
+            order_amount = min_order_amount
             order_pct = (order_amount / account_balance) * 100
+            print(f"⚠️ 下单金额小于最小值，调整至: {min_order_amount} USDC")
         else:
-            return 0, 0  # 金额太小，不下单
+            # 金额太小，不下单
+            print(f"⚠️ 计算的下单金额 ({order_amount:.2f} USDC) 小于最小值，无法下单")
+            return 0, 0
+
+    # 打印最终下单信息
+    print(f"📈 最终下单金额: {order_amount:.2f} USDC ({order_pct:.2f}% 账户余额)")
 
     return order_amount, order_pct
 

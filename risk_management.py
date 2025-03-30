@@ -392,13 +392,13 @@ def adaptive_risk_management(df: pd.DataFrame, account_balance: float, quality_s
         # 市场趋势分析
         trend, _, trend_info = get_smc_trend_and_duration(df)
 
-        # 基于质量评分调整风险
+        # 基于质量评分调整风险 - 增加风险百分比
         if quality_score >= 8.0:
-            max_risk_percent = 2.0  # 高质量信号，可接受更高风险
+            max_risk_percent = 3.0  # 高质量信号，可接受更高风险 (从2.0改为3.0)
         elif quality_score >= 6.0:
-            max_risk_percent = 1.5  # 中等质量信号
+            max_risk_percent = 2.5  # 中等质量信号 (从1.5改为2.5)
         else:
-            max_risk_percent = 1.0  # 低质量信号，降低风险
+            max_risk_percent = 2.0  # 低质量信号，降低风险 (从1.0改为2.0)
 
         # 基于趋势调整风险
         if trend_info["confidence"] == "高":
@@ -419,6 +419,19 @@ def adaptive_risk_management(df: pd.DataFrame, account_balance: float, quality_s
             max_risk_percent,
             leverage
         )
+
+        # 新增：确保名义价值足够
+        min_position_value = 50.0  # 最小50美元
+        if position_result["position_value"] < min_position_value:
+            # 调整仓位大小确保至少达到最小名义价值
+            position_size = min_position_value / current_price
+            position_value = min_position_value
+
+            # 更新仓位信息
+            position_result["position_size"] = position_size
+            position_result["position_value"] = position_value
+
+            print_colored(f"⚠️ 仓位价值过小，已调整为最小值: {min_position_value} USDC", Colors.WARNING)
 
         # 计算移动止损参数
         market_conditions = {"environment": "trending" if trend != "NEUTRAL" else "ranging"}
