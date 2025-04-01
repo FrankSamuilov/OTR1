@@ -212,8 +212,8 @@ def adjust_position_for_market_change(positions, client, logger=None):
             max_profit = profit_amount
 
         # 动态止盈止损计算
-        dynamic_take_profit = pos.get("dynamic_take_profit", 0.06)  # 默认6%
-        stop_loss = pos.get("stop_loss", -0.03)  # 默认-3%
+        dynamic_take_profit = pos.get("dynamic_take_profit", 0.03)  # 默认3
+        stop_loss = pos.get("stop_loss", -0.015)  # 默认-1.5%
 
         # 根据持仓时间和最大利润调整止盈止损
         if holding_minutes > 60:  # 持仓超过1小时
@@ -240,8 +240,6 @@ def adjust_position_for_market_change(positions, client, logger=None):
             action = "take_profit"
         elif profit_pct <= stop_loss:
             action = "stop_loss"
-        elif holding_minutes > 240 and profit_pct < 0:  # 4小时后仍亏损
-            action = "time_stop"
 
         if action:
             actions.append({

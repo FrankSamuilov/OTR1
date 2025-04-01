@@ -719,6 +719,100 @@ def detect_order_blocks_3d(df, volume_threshold=1.3, price_deviation=0.002, cons
             (trend == 'DOWN' and b['type'] == 'ask')]
 
 
+def calculate_vortex_indicator(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
+    """
+    计算Vortex指标
+
+    参数:
+        df: 包含OHLC数据的DataFrame
+        period: 计算周期，默认14
+
+    返回:
+        df: 添加了Vortex指标的DataFrame
+    """
+    try:
+        if len(df) < period + 1:
+            print_colored(f"⚠️ 数据长度 {len(df)} 小于Vortex指标周期+1 ({period + 1})", Colors.WARNING)
+            return df
+
+        # 计算真实范围 (True Range)
+        df['TR'] = df['ATR'] if 'ATR' in df.columns else np.maximum(
+            np.maximum(
+                df['high'] - df['low'],
+                abs(df['high'] - df['close'].shift(1))
+            ),
+            abs(df['low'] - df['close'].shift(1))
+        )
+
+        # 计算VM+ (上升趋势的动量)
+        df['VM_plus'] = abs(df['high'] - df['low'].shift(1))
+
+        # 计算VM- (下降趋势的动量)
+        df['VM_minus'] = abs(df['low'] - df['high'].shift(1))
+
+        # 计算周期内的总和
+        df['TR_sum'] = df['TR'].rolling(window=period).sum()
+        df['VM_plus_sum'] = df['VM_plus'].rolling(window=period).sum()
+        df['VM_minus_sum'] = df['VM_minus'].rolling(window=period).sum()
+
+        # 计算最终的Vortex指标
+        df['VI_plus'] = df['VM_plus_sum'] / df['TR_sum']
+        df['VI_minus'] = df['VM_minus_sum'] / df['TR_sum']
+
+        # 计算Vortex指标差值
+        df['VI_diff'] = df['VI_plus'] - df['VI_minus']
+
+        # 记录交叉信号
+        df['Vortex_Cross_Up'] = (
+                (df['VI_plus'] > df['VI_minus']) &
+                (df['VI_plus'].shift(1) <= df['VI_minus'].shift(1))
+        ).astype(int)
+
+        df['Vortex_Cross_Down'] = (
+                (df['VI_plus'] < df['VI_minus']) &
+                (df['VI_plus'].shift(1) >= df['VI_minus'].shift(1))
+        ).astype(int)
+
+        # 获取最新值并打印
+        latest_vi_plus = df['VI_plus'].iloc[-1]
+        latest_vi_minus = df['VI_minus'].iloc[-1]
+        latest_diff = df['VI_diff'].iloc[-1]
+
+        # 确定趋势状态
+        if latest_vi_plus > latest_vi_minus:
+            trend_state = "上升趋势"
+            color = Colors.GREEN
+        else:
+            trend_state = "下降趋势"
+            color = Colors.RED
+
+        # 判断交叉信号
+        cross_up = df['Vortex_Cross_Up'].iloc[-1]
+        cross_down = df['Vortex_Cross_Down'].iloc[-1]
+
+        cross_message = ""
+        if cross_up:
+            cross_message = f"{Colors.GREEN}VI+上穿VI-{Colors.RESET}"
+        elif cross_down:
+            cross_message = f"{Colors.RED}VI+下穿VI-{Colors.RESET}"
+
+        print_colored(
+            f"Vortex指标: {color}VI+({latest_vi_plus:.4f}) VI-({latest_vi_minus:.4f}){Colors.RESET} "
+            f"差值: {latest_diff:.4f} - {trend_state} {cross_message}",
+            Colors.INFO
+        )
+
+        # 清理中间计算列
+        if 'TR' not in df.columns:  # 如果TR之前不存在，则删除
+            df = df.drop(['TR'], axis=1)
+        df = df.drop(['VM_plus', 'VM_minus', 'TR_sum', 'VM_plus_sum', 'VM_minus_sum'], axis=1)
+
+        return df
+    except Exception as e:
+        print_colored(f"❌ 计算Vortex指标失败: {e}", Colors.ERROR)
+        return df
+
+
 def find_swing_points(df: pd.DataFrame, window=3):
         """
         改进摆动点识别，增加窗口参数以平滑噪声
@@ -883,7 +977,8 @@ def calculate_optimized_indicators(df: pd.DataFrame, btc_df=None):
         all_indicators = ['VWAP', 'EMA24', 'EMA52', 'MACD', 'MACD_signal', 'RSI', 'OBV', 'TR',
                           'ATR', 'Momentum', 'BB_Middle', 'BB_Std', 'BB_Upper', 'BB_Lower',
                           'ROC', 'ADX', 'Market_Sentiment', 'CCI', 'EMA5', 'EMA20', 'Panic_Index',
-                          'Supertrend', 'Supertrend_Direction', 'SMMA60', 'Williams_R']
+                          'Supertrend', 'Supertrend_Direction', 'SMMA60', 'Williams_R',
+                          'VI_plus', 'VI_minus', 'VI_diff', 'Vortex_Cross_Up', 'Vortex_Cross_Down']
 
         # 检查输入数据
         if df is None or df.empty or not all(col in df.columns for col in required_cols):
@@ -984,6 +1079,12 @@ def calculate_optimized_indicators(df: pd.DataFrame, btc_df=None):
             df = calculate_williams_r(df, period=14)
         else:
             print_colored(f"⚠️ 数据不足（{len(df)}根K线），无法计算Williams %R（需要14根K线）", Colors.WARNING)
+
+        # 计算Vortex指标
+        if len(df) >= 14:
+            df = calculate_vortex_indicator(df, period=14)
+        else:
+            print_colored(f"⚠️ 数据不足（{len(df)}根K线），无法计算Vortex指标（需要14根K线）", Colors.WARNING)
 
         # 计算OBV
         df['OBV'] = (np.sign(df['close'].diff()) * df['volume']).fillna(0).cumsum()

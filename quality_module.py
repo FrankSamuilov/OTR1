@@ -27,27 +27,37 @@ def calculate_quality_score(df, client=None, symbol=None, btc_df=None, config=No
 
     # 防御性检查
     if df is None or len(df) < 20:
+        if logger:
+            logger.warning(f"{symbol}数据不足，无法计算质量评分")
+        print(f"⚠️ {symbol}数据不足，无法计算质量评分")
         return 0.0, {'error': 'insufficient_data'}
 
     # 基本风险评估 (3分)
     risk_score = 3.0
+    print(f"📊 {symbol} - 基础风险评分: {risk_score}")
 
     # 1. 市场结构评估 (SMC核心) - 最高2分
     trend, duration, trend_info = get_smc_trend_and_duration(df, config, logger)
     metrics['trend'] = trend
     metrics['duration'] = duration
+    print(f"📈 {symbol} - 市场趋势: {trend}, 持续时间: {duration}分钟")
 
     # 稳定上升趋势得高分
     if trend == "UP" and duration > 60:  # 超过1小时的上升趋势
         structure_score = 2.0
+        print(f"✅ {symbol} - 稳定上升趋势，结构评分: 2.0")
     elif trend == "UP":
         structure_score = 1.5
+        print(f"✅ {symbol} - 上升趋势，结构评分: 1.5")
     elif trend == "NEUTRAL":
         structure_score = 1.0
+        print(f"⚖️ {symbol} - 中性趋势，结构评分: 1.0")
     elif trend == "DOWN" and duration > 60:  # 明显下降趋势
         structure_score = 0.5  # 风险较高
+        print(f"⚠️ {symbol} - 明显下降趋势，结构评分: 0.5")
     else:
         structure_score = 0.8
+        print(f"⚠️ {symbol} - 不明确趋势，结构评分: 0.8")
     metrics['structure_score'] = structure_score
 
     # 2. 订单块和流动性评估 - 最高2分
@@ -56,14 +66,17 @@ def calculate_quality_score(df, client=None, symbol=None, btc_df=None, config=No
         volume_mean = df['volume'].rolling(20).mean().iloc[-1]
         recent_volume = df['volume'].iloc[-1]
         volume_ratio = recent_volume / volume_mean if volume_mean > 0 else 1.0
+        print(f"📊 {symbol} - 成交量比率: {volume_ratio:.2f}")
 
         # OBV趋势评估
         obv_trend = df['OBV'].iloc[-1] > df['OBV'].iloc[-5] if 'OBV' in df.columns and len(df) >= 5 else False
+        print(f"📊 {symbol} - OBV趋势{'上升' if obv_trend else '下降'}")
 
         # ATR评估 - 波动率
         atr = df['ATR'].iloc[-1] if 'ATR' in df.columns else 0
         atr_mean = df['ATR'].rolling(20).mean().iloc[-1] if 'ATR' in df.columns else 1
         atr_ratio = atr / atr_mean if atr_mean > 0 else 1.0
+        print(f"📊 {symbol} - 波动率比率: {atr_ratio:.2f}")
 
         # 订单块评估
         has_order_block = (volume_ratio > 1.3 and
@@ -90,9 +103,10 @@ def calculate_quality_score(df, client=None, symbol=None, btc_df=None, config=No
         metrics['order_block_score'] = order_block_score
     except Exception as e:
         if logger:
-            logger.error(f"订单块评估出错: {e}")
+            logger.error(f"{symbol}订单块评估出错: {e}")
         order_block_score = 0.5
         metrics['order_block_error'] = str(e)
+        print(f"❌ {symbol} - 订单块评估出错: {e}")
 
     # 3. 支撑阻力评估 - 最高2分
     try:
@@ -153,9 +167,10 @@ def calculate_quality_score(df, client=None, symbol=None, btc_df=None, config=No
         metrics['sr_score'] = sr_score
     except Exception as e:
         if logger:
-            logger.error(f"支撑阻力评估出错: {e}")
+            logger.error(f"{symbol}支撑阻力评估出错: {e}")
         sr_score = 1.0
         metrics['sr_error'] = str(e)
+        print(f"❌ {symbol} - 支撑阻力评估出错: {e}")
 
     # 4. 技术指标评估 - 最高2分
     try:
@@ -208,53 +223,134 @@ def calculate_quality_score(df, client=None, symbol=None, btc_df=None, config=No
         elif bb_width > 0.08:  # 较宽，波动较大
             tech_score -= 0.2
 
+        # Vortex指标评估 - 虚拟货币市场优化
+        if 'VI_plus' in df.columns and 'VI_minus' in df.columns:
+            vi_plus = df['VI_plus'].iloc[-1]
+            vi_minus = df['VI_minus'].iloc[-1]
+            vi_diff = df['VI_diff'].iloc[-1]
+
+            # Vortex趋势方向是否与总体趋势一致
+            vortex_trend_aligned = (vi_plus > vi_minus and trend == "UP") or (vi_plus < vi_minus and trend == "DOWN")
+
+            # 趋势强度评估 - 针对虚拟货币波动性调整
+            trend_strength = abs(vi_diff) * 10  # 放大差值
+
+            print(f"📊 {symbol} - Vortex趋势指示: {'上升' if vi_plus > vi_minus else '下降'}, "
+                  f"与主趋势一致: {vortex_trend_aligned}, 强度: {trend_strength:.2f}")
+
+            # 记录指标值
+            metrics['vortex_plus'] = float(vi_plus)
+            metrics['vortex_minus'] = float(vi_minus)
+            metrics['vortex_diff'] = float(vi_diff)
+            metrics['vortex_aligned'] = vortex_trend_aligned
+            metrics['vortex_strength'] = float(trend_strength)
+
+            # 根据Vortex指标调整技术评分
+            if vortex_trend_aligned:
+                # 虚拟货币趋势一致性更重要，加大分数
+                tech_score += 0.4
+                print(f"✅ {symbol} - Vortex指标与主趋势一致，技术加分: +0.4")
+
+                # 额外考虑趋势强度
+                if trend_strength > 1.5:
+                    tech_score += 0.2
+                    print(f"✅ {symbol} - Vortex趋势强度高 ({trend_strength:.2f})，额外加分: +0.2")
+
+            # 如果Vortex刚刚发生交叉，增加更多分数
+            vortex_cross_up = df['Vortex_Cross_Up'].iloc[-1] if 'Vortex_Cross_Up' in df.columns else 0
+            vortex_cross_down = df['Vortex_Cross_Down'].iloc[-1] if 'Vortex_Cross_Down' in df.columns else 0
+
+            metrics['vortex_cross_up'] = bool(vortex_cross_up)
+            metrics['vortex_cross_down'] = bool(vortex_cross_down)
+
+            if (vortex_cross_up and trend == "UP") or (vortex_cross_down and trend == "DOWN"):
+                # 虚拟货币交叉信号更有价值，加大分数
+                tech_score += 0.5
+                print(f"✅ {symbol} - Vortex指标刚刚发生与趋势一致的交叉，重要信号加分: +0.5")
+
         # 确保在范围内
         tech_score = max(0.0, min(2.0, tech_score))
+        print(f"📊 {symbol} - 最终技术指标评分: {tech_score:.2f}")
         metrics['tech_score'] = tech_score
     except Exception as e:
         if logger:
-            logger.error(f"技术指标评估出错: {e}")
+            logger.error(f"{symbol}技术指标评估出错: {e}")
         tech_score = 0.8
         metrics['tech_error'] = str(e)
+        print(f"❌ {symbol} - 技术指标评估出错: {e}")
 
     # 5. 市场情绪评估 - 最高1分
     try:
         market_score = 0.5  # 默认中性
+        print(f"📊 {symbol} - 默认市场情绪评分: 0.5")
 
         # 如果提供了BTC数据，评估整体市场情绪
         if btc_df is not None and len(btc_df) > 5:
             btc_change = (btc_df['close'].iloc[-1] - btc_df['close'].iloc[-5]) / btc_df['close'].iloc[-5]
+            print(f"📊 {symbol} - BTC变化率: {btc_change:.2%}")
 
             if btc_change > 0.02:  # BTC上涨超过2%
                 market_score = 1.0
+                print(f"✅ {symbol} - BTC强势上涨，市场情绪评分: 1.0")
             elif btc_change > 0.005:  # BTC小幅上涨
                 market_score = 0.8
+                print(f"✅ {symbol} - BTC小幅上涨，市场情绪评分: 0.8")
             elif btc_change < -0.02:  # BTC下跌超过2%
                 market_score = 0.2
+                print(f"⚠️ {symbol} - BTC强势下跌，市场情绪评分: 0.2")
             elif btc_change < -0.005:  # BTC小幅下跌
                 market_score = 0.3
+                print(f"⚠️ {symbol} - BTC小幅下跌，市场情绪评分: 0.3")
 
         # 如果提供了客户端和符号，也可以查看期货资金费率
         if client and symbol:
             try:
                 funding_rate = float(client.futures_mark_price(symbol=symbol)['lastFundingRate'])
+                print(f"📊 {symbol} - 资金费率: {funding_rate:.6f}")
+
                 # 负的资金费率通常对做多有利
                 if funding_rate < -0.0002:  # 明显为负
                     market_score += 0.1
+                    print(f"✅ {symbol} - 负资金费率，市场情绪加分: +0.1")
                 elif funding_rate > 0.0002:  # 明显为正
                     market_score -= 0.1
+                    print(f"⚠️ {symbol} - 正资金费率，市场情绪减分: -0.1")
             except:
                 pass  # 忽略资金费率获取错误
 
         metrics['market_score'] = market_score
     except Exception as e:
         if logger:
-            logger.error(f"市场情绪评估出错: {e}")
+            logger.error(f"{symbol}市场情绪评估出错: {e}")
         market_score = 0.5
         metrics['market_error'] = str(e)
+        print(f"❌ {symbol} - 市场情绪评估出错: {e}")
+
+    # 震荡市场检测与降分
+    is_ranging = False
+    if 'ADX' in df.columns:
+        adx = df['ADX'].iloc[-1]
+        if adx < 20:
+            is_ranging = True
+            # 震荡市场降分
+            quality_penalty = 2.0  # 在震荡市场降低2分
+            print(f"⚠️ {symbol} - 检测到震荡市场 (ADX: {adx:.2f} < 20)，评分惩罚: -2.0")
+            metrics['is_ranging'] = True
+            metrics['adx_value'] = adx
+        else:
+            print(f"📊 {symbol} - ADX: {adx:.2f} >= 20，非震荡市场")
 
     # 汇总得分
     quality_score = risk_score + structure_score + order_block_score + sr_score + tech_score + market_score
+
+    # 对震荡市场进行惩罚
+    if is_ranging:
+        quality_score = max(0.0, quality_score - 2.0)
+
+    # 对趋势不明确的市场降分
+    if trend == "NEUTRAL":
+        quality_score *= 0.8
+        print(f"⚠️ {symbol} - 趋势不明确，总评分乘以0.8")
 
     # 确保最终分数在0-10范围内
     quality_score = max(0.0, min(10.0, quality_score))
@@ -262,6 +358,13 @@ def calculate_quality_score(df, client=None, symbol=None, btc_df=None, config=No
     # 记录所有评分组成
     metrics['risk_score'] = risk_score
     metrics['final_score'] = quality_score
+
+    print(f"🏆 {symbol} - 最终质量评分: {quality_score:.2f}")
+    print(
+        f"组成: 风险({risk_score}) + 结构({structure_score}) + 订单块({order_block_score}) + 支撑阻力({sr_score}) + 技术({tech_score}) + 市场({market_score})")
+
+    if logger:
+        logger.info(f"{symbol}质量评分: {quality_score:.2f}", extra=metrics)
 
     return quality_score, metrics
 

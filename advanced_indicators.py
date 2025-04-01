@@ -465,6 +465,116 @@ def analyze_advanced_indicators(df: pd.DataFrame) -> Dict[str, Any]:
         }
 
 
+def analyze_vortex_indicator(df: pd.DataFrame) -> Dict[str, Any]:
+    """
+    分析Vortex指标，生成详细的交易信号和趋势强度评估
+
+    参数:
+        df: 包含计算好的Vortex指标的DataFrame
+
+    返回:
+        包含分析结果的字典
+    """
+    try:
+        result = {
+            "signal": "NEUTRAL",
+            "confidence": 0.0,
+            "strength": 0.0,
+            "reasons": [],
+            "details": {}
+        }
+
+        # 检查Vortex指标是否存在
+        if not all(col in df.columns for col in ['VI_plus', 'VI_minus']):
+            # 如果指标不存在，计算它
+            if len(df) >= 14:
+                df = calculate_vortex_indicator(df)
+            else:
+                print_colored("⚠️ 数据不足，无法计算Vortex指标", Colors.WARNING)
+                return result
+
+        # 获取最新值
+        vi_plus = df['VI_plus'].iloc[-1]
+        vi_minus = df['VI_minus'].iloc[-1]
+        vi_diff = df['VI_diff'].iloc[-1] if 'VI_diff' in df.columns else vi_plus - vi_minus
+
+        # 检查交叉信号
+        vortex_cross_up = df['Vortex_Cross_Up'].iloc[-1] if 'Vortex_Cross_Up' in df.columns else 0
+        vortex_cross_down = df['Vortex_Cross_Down'].iloc[-1] if 'Vortex_Cross_Down' in df.columns else 0
+
+        # 记录基础值
+        result["details"] = {
+            "vi_plus": float(vi_plus),
+            "vi_minus": float(vi_minus),
+            "vi_diff": float(vi_diff),
+            "cross_up": bool(vortex_cross_up),
+            "cross_down": bool(vortex_cross_down)
+        }
+
+        # 计算趋势强度 - 针对虚拟货币市场优化
+        strength = abs(vi_diff) * 10  # 放大差值
+        result["strength"] = float(strength)
+
+        # 确定信号
+        if vi_plus > vi_minus:
+            result["signal"] = "BUY"
+
+            # 计算置信度
+            if vortex_cross_up:
+                # 刚刚发生上穿 - 较强信号
+                result["confidence"] = min(1.0, 0.7 + strength * 0.2)
+                result["reasons"].append(f"Vortex VI+上穿VI-，形成新的上升趋势")
+            else:
+                # 持续上升趋势
+                # 根据趋势强度调整置信度
+                result["confidence"] = min(1.0, 0.5 + strength * 0.25)
+                result["reasons"].append(f"Vortex处于上升趋势，强度: {strength:.2f}")
+
+        elif vi_plus < vi_minus:
+            result["signal"] = "SELL"
+
+            # 计算置信度
+            if vortex_cross_down:
+                # 刚刚发生下穿 - 较强信号
+                result["confidence"] = min(1.0, 0.7 + strength * 0.2)
+                result["reasons"].append(f"Vortex VI+下穿VI-，形成新的下降趋势")
+            else:
+                # 持续下降趋势
+                result["confidence"] = min(1.0, 0.5 + strength * 0.25)
+                result["reasons"].append(f"Vortex处于下降趋势，强度: {strength:.2f}")
+
+        # 虚拟货币市场特殊考量：增加极端趋势识别
+        if strength > 2.0:
+            result["reasons"].append(f"Vortex显示极强趋势({strength:.2f})，适合顺势交易")
+        elif strength < 0.3:
+            result["reasons"].append(f"Vortex趋势强度较弱({strength:.2f})，可能处于震荡区间")
+            # 弱趋势降低置信度
+            result["confidence"] *= 0.7
+
+        # 打印结果
+        signal_color = Colors.GREEN if result["signal"] == "BUY" else Colors.RED if result[
+                                                                                        "signal"] == "SELL" else Colors.RESET
+        print_colored(
+            f"Vortex分析结果: {signal_color}{result['signal']}{Colors.RESET}, "
+            f"置信度: {result['confidence']:.2f}, 强度: {result['strength']:.2f}",
+            Colors.INFO
+        )
+
+        for reason in result["reasons"]:
+            print_colored(f"• {reason}", Colors.INFO)
+
+        return result
+
+    except Exception as e:
+        print_colored(f"❌ 分析Vortex指标失败: {e}", Colors.ERROR)
+        return {
+            "signal": "NEUTRAL",
+            "confidence": 0.0,
+            "strength": 0.0,
+            "reasons": [f"分析出错: {str(e)}"],
+            "error": str(e)
+        }
+
 def get_advanced_indicator_score(df: pd.DataFrame) -> float:
     """
     基于高级指标计算质量评分

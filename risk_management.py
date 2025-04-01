@@ -406,6 +406,42 @@ def adaptive_risk_management(df: pd.DataFrame, account_balance: float, quality_s
         elif trend_info["confidence"] == "低":
             max_risk_percent *= 0.8  # 低置信度趋势，降低风险
 
+        # 考虑Vortex指标调整风险
+        vortex_adjustment = 1.0
+        if 'VI_plus' in df.columns and 'VI_minus' in df.columns:
+            vi_plus = df['VI_plus'].iloc[-1]
+            vi_minus = df['VI_minus'].iloc[-1]
+            vi_diff = abs(df['VI_diff'].iloc[-1]) if 'VI_diff' in df.columns else abs(vi_plus - vi_minus)
+
+            # 计算趋势一致性
+            vortex_trend = 1 if vi_plus > vi_minus else -1
+            trade_trend = 1 if side.upper() == "BUY" else -1
+
+            # 方向一致时增加风险接受度
+            if vortex_trend == trade_trend:
+                strength = vi_diff * 10  # 放大差值用于评估强度
+                if strength > 1.5:
+                    vortex_adjustment = 1.2  # 强趋势增加20%风险接受度
+                    print_colored(f"Vortex指标显示强烈趋势与交易方向一致，风险调整: +20%", Colors.GREEN)
+                elif strength > 0.8:
+                    vortex_adjustment = 1.1  # 中等趋势增加10%风险接受度
+                    print_colored(f"Vortex指标与交易方向一致，风险调整: +10%", Colors.GREEN)
+            # 方向不一致时降低风险接受度
+            else:
+                vortex_adjustment = 0.8  # 降低20%风险接受度
+                print_colored(f"Vortex指标与交易方向不一致，风险调整: -20%", Colors.WARNING)
+
+            # 检查是否有交叉信号
+            cross_up = df['Vortex_Cross_Up'].iloc[-1] if 'Vortex_Cross_Up' in df.columns else 0
+            cross_down = df['Vortex_Cross_Down'].iloc[-1] if 'Vortex_Cross_Down' in df.columns else 0
+
+            if (cross_up and side.upper() == "BUY") or (cross_down and side.upper() == "SELL"):
+                vortex_adjustment *= 1.1  # 交叉信号再增加10%
+                print_colored(f"Vortex交叉信号与交易方向一致，额外风险调整: +10%", Colors.GREEN)
+
+        # 应用Vortex调整到风险百分比
+        max_risk_percent *= vortex_adjustment
+
         # 计算止损点
         stop_loss_result = advanced_smc_stop_loss(df, current_price, leverage, side)
         stop_loss = stop_loss_result["stop_loss"]
@@ -456,7 +492,8 @@ def adaptive_risk_management(df: pd.DataFrame, account_balance: float, quality_s
             "trailing_stop": trailing_stop_params,
             "quality_score": quality_score,
             "trend": trend,
-            "trend_confidence": trend_info["confidence"]
+            "trend_confidence": trend_info["confidence"],
+            "vortex_adjustment": vortex_adjustment
         }
 
         # 判断是否应该执行交易
