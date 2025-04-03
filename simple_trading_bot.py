@@ -24,8 +24,7 @@ from logger_utils import Colors, print_colored
 import datetime
 import time
 from integration_module import calculate_enhanced_indicators, generate_trade_recommendation
-
-
+from multi_timeframe_module import MultiTimeframeCoordinator
 
 
 class EnhancedTradingBot:

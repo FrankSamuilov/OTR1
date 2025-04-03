@@ -719,9 +719,182 @@ def detect_order_blocks_3d(df, volume_threshold=1.3, price_deviation=0.002, cons
             (trend == 'DOWN' and b['type'] == 'ask')]
 
 
+def calculate_indicator_resonance(df: pd.DataFrame) -> Dict[str, Any]:
+    """计算指标共振评分，评估多指标之间的一致性"""
+    resonance = {
+        "buy_signals": 0,
+        "sell_signals": 0,
+        "buy_confidence": 0.0,
+        "sell_confidence": 0.0,
+        "buy_indicators": [],
+        "sell_indicators": [],
+        "neutral_count": 0
+    }
+
+    # 检查Vortex指标
+    if 'VI_plus' in df.columns and 'VI_minus' in df.columns:
+        vi_plus = df['VI_plus'].iloc[-1]
+        vi_minus = df['VI_minus'].iloc[-1]
+        cross_up = df['Vortex_Cross_Up'].iloc[-1] if 'Vortex_Cross_Up' in df.columns else 0
+        cross_down = df['Vortex_Cross_Down'].iloc[-1] if 'Vortex_Cross_Down' in df.columns else 0
+
+        if vi_plus > vi_minus:
+            resonance["buy_signals"] += 1
+            confidence = 0.5
+            if cross_up:
+                confidence += 0.3  # 刚交叉，信号更强
+            resonance["buy_confidence"] += confidence
+            resonance["buy_indicators"].append(f"Vortex(+{confidence:.1f})")
+        elif vi_plus < vi_minus:
+            resonance["sell_signals"] += 1
+            confidence = 0.5
+            if cross_down:
+                confidence += 0.3  # 刚交叉，信号更强
+            resonance["sell_confidence"] += confidence
+            resonance["sell_indicators"].append(f"Vortex(+{confidence:.1f})")
+        else:
+            resonance["neutral_count"] += 1
+
+    # 检查RSI指标
+    if 'RSI' in df.columns:
+        rsi = df['RSI'].iloc[-1]
+        if rsi < 30:  # 超卖
+            resonance["buy_signals"] += 1
+            confidence = 0.7
+            resonance["buy_confidence"] += confidence
+            resonance["buy_indicators"].append(f"RSI超卖(+{confidence:.1f})")
+        elif rsi > 70:  # 超买
+            resonance["sell_signals"] += 1
+            confidence = 0.7
+            resonance["sell_confidence"] += confidence
+            resonance["sell_indicators"].append(f"RSI超买(+{confidence:.1f})")
+        else:
+            # 中性区域，检查趋势
+            rsi_trend = df['RSI'].iloc[-1] - df['RSI'].iloc[-5] if len(df) >= 5 else 0
+            if rsi_trend > 5:  # 上升趋势
+                resonance["buy_signals"] += 0.5
+                resonance["buy_confidence"] += 0.3
+                resonance["buy_indicators"].append("RSI上升(+0.3)")
+            elif rsi_trend < -5:  # 下降趋势
+                resonance["sell_signals"] += 0.5
+                resonance["sell_confidence"] += 0.3
+                resonance["sell_indicators"].append("RSI下降(+0.3)")
+            else:
+                resonance["neutral_count"] += 1
+
+    # 检查MACD指标
+    if 'MACD' in df.columns and 'MACD_signal' in df.columns:
+        macd = df['MACD'].iloc[-1]
+        signal = df['MACD_signal'].iloc[-1]
+
+        # 检查交叉
+        macd_cross_up = macd > signal and df['MACD'].iloc[-2] <= df['MACD_signal'].iloc[-2]
+        macd_cross_down = macd < signal and df['MACD'].iloc[-2] >= df['MACD_signal'].iloc[-2]
+
+        if macd > signal:
+            resonance["buy_signals"] += 1
+            confidence = 0.5
+            if macd_cross_up:
+                confidence += 0.4  # 刚交叉，信号更强
+            resonance["buy_confidence"] += confidence
+            resonance["buy_indicators"].append(f"MACD(+{confidence:.1f})")
+        elif macd < signal:
+            resonance["sell_signals"] += 1
+            confidence = 0.5
+            if macd_cross_down:
+                confidence += 0.4  # 刚交叉，信号更强
+            resonance["sell_confidence"] += confidence
+            resonance["sell_indicators"].append(f"MACD(+{confidence:.1f})")
+        else:
+            resonance["neutral_count"] += 1
+
+    # 检查Supertrend指标
+    if 'Supertrend_Direction' in df.columns:
+        st_direction = df['Supertrend_Direction'].iloc[-1]
+
+        if st_direction > 0:  # 看涨
+            resonance["buy_signals"] += 1
+            resonance["buy_confidence"] += 0.8  # Supertrend较强信号
+            resonance["buy_indicators"].append("Supertrend(+0.8)")
+        elif st_direction < 0:  # 看跌
+            resonance["sell_signals"] += 1
+            resonance["sell_confidence"] += 0.8
+            resonance["sell_indicators"].append("Supertrend(+0.8)")
+        else:
+            resonance["neutral_count"] += 1
+
+    # 添加Vortex与其他指标的协同性检查
+
+    # Vortex + RSI协同
+    if 'VI_plus' in df.columns and 'RSI' in df.columns:
+        vi_plus = df['VI_plus'].iloc[-1]
+        vi_minus = df['VI_minus'].iloc[-1]
+        rsi = df['RSI'].iloc[-1]
+
+        # Vortex上升 + RSI健康 = 强买入
+        if vi_plus > vi_minus and 30 <= rsi <= 70:
+            resonance["buy_confidence"] += 0.4
+            resonance["buy_indicators"].append("Vortex+RSI协同(+0.4)")
+
+        # Vortex下降 + RSI超买 = 强卖出
+        elif vi_plus < vi_minus and rsi > 70:
+            resonance["sell_confidence"] += 0.4
+            resonance["sell_indicators"].append("Vortex+RSI协同(+0.4)")
+
+    # Vortex + MACD协同
+    if 'VI_plus' in df.columns and 'MACD' in df.columns and 'MACD_signal' in df.columns:
+        vi_plus = df['VI_plus'].iloc[-1]
+        vi_minus = df['VI_minus'].iloc[-1]
+        macd = df['MACD'].iloc[-1]
+        signal = df['MACD_signal'].iloc[-1]
+
+        # 两者同向 = 强信号
+        if vi_plus > vi_minus and macd > signal:
+            resonance["buy_confidence"] += 0.5
+            resonance["buy_indicators"].append("Vortex+MACD协同(+0.5)")
+        elif vi_plus < vi_minus and macd < signal:
+            resonance["sell_confidence"] += 0.5
+            resonance["sell_indicators"].append("Vortex+MACD协同(+0.5)")
+
+    # Vortex + Supertrend协同
+    if 'VI_plus' in df.columns and 'Supertrend_Direction' in df.columns:
+        vi_plus = df['VI_plus'].iloc[-1]
+        vi_minus = df['VI_minus'].iloc[-1]
+        st_direction = df['Supertrend_Direction'].iloc[-1]
+
+        # 两者同向 = 强信号
+        if vi_plus > vi_minus and st_direction > 0:
+            resonance["buy_confidence"] += 0.6
+            resonance["buy_indicators"].append("Vortex+Supertrend协同(+0.6)")
+        elif vi_plus < vi_minus and st_direction < 0:
+            resonance["sell_confidence"] += 0.6
+            resonance["sell_indicators"].append("Vortex+Supertrend协同(+0.6)")
+
+    # Vortex + 布林带协同
+    if 'VI_plus' in df.columns and all(col in df.columns for col in ['BB_Upper', 'BB_Lower', 'BB_Middle']):
+        vi_plus = df['VI_plus'].iloc[-1]
+        vi_minus = df['VI_minus'].iloc[-1]
+        bb_width = (df['BB_Upper'].iloc[-1] - df['BB_Lower'].iloc[-1]) / df['BB_Middle'].iloc[-1]
+        price = df['close'].iloc[-1]
+
+        # 布林带收缩 + Vortex交叉 = 强突破信号
+        if bb_width < 0.03 and df['Vortex_Cross_Up'].iloc[-1]:
+            resonance["buy_confidence"] += 0.7
+            resonance["buy_indicators"].append("Vortex+布林带突破(+0.7)")
+        elif bb_width < 0.03 and df['Vortex_Cross_Down'].iloc[-1]:
+            resonance["sell_confidence"] += 0.7
+            resonance["sell_indicators"].append("Vortex+布林带突破(+0.7)")
+
+    # 计算最终共振得分
+    resonance["total_buy_score"] = resonance["buy_signals"] * resonance["buy_confidence"]
+    resonance["total_sell_score"] = resonance["sell_signals"] * resonance["sell_confidence"]
+
+    return resonance
+
+
 def calculate_vortex_indicator(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
     """
-    计算Vortex指标
+    计算Vortex指标 - 增强数值稳定性版本
 
     参数:
         df: 包含OHLC数据的DataFrame
@@ -735,48 +908,66 @@ def calculate_vortex_indicator(df: pd.DataFrame, period: int = 14) -> pd.DataFra
             print_colored(f"⚠️ 数据长度 {len(df)} 小于Vortex指标周期+1 ({period + 1})", Colors.WARNING)
             return df
 
-        # 计算真实范围 (True Range)
-        df['TR'] = df['ATR'] if 'ATR' in df.columns else np.maximum(
-            np.maximum(
-                df['high'] - df['low'],
-                abs(df['high'] - df['close'].shift(1))
-            ),
-            abs(df['low'] - df['close'].shift(1))
-        )
+        # 创建副本防止修改原始数据
+        df_copy = df.copy()
+
+        # 计算真实范围 (True Range)，确保有最小值避免除零
+        eps = 1e-10  # 极小值，防止除零
+
+        if 'ATR' in df_copy.columns:
+            df_copy['TR'] = df_copy['ATR'].copy()
+        else:
+            df_copy['TR'] = np.maximum(
+                np.maximum(
+                    df_copy['high'] - df_copy['low'],
+                    abs(df_copy['high'] - df_copy['close'].shift(1))
+                ),
+                abs(df_copy['low'] - df_copy['close'].shift(1))
+            )
+            # 确保TR不为零
+            df_copy['TR'] = df_copy['TR'].replace(0, eps)
 
         # 计算VM+ (上升趋势的动量)
-        df['VM_plus'] = abs(df['high'] - df['low'].shift(1))
+        df_copy['VM_plus'] = abs(df_copy['high'] - df_copy['low'].shift(1)).fillna(0)
 
         # 计算VM- (下降趋势的动量)
-        df['VM_minus'] = abs(df['low'] - df['high'].shift(1))
+        df_copy['VM_minus'] = abs(df_copy['low'] - df_copy['high'].shift(1)).fillna(0)
 
-        # 计算周期内的总和
-        df['TR_sum'] = df['TR'].rolling(window=period).sum()
-        df['VM_plus_sum'] = df['VM_plus'].rolling(window=period).sum()
-        df['VM_minus_sum'] = df['VM_minus'].rolling(window=period).sum()
+        # 计算周期内的总和，确保填充NaN值
+        df_copy['TR_sum'] = df_copy['TR'].rolling(window=period).sum().fillna(df_copy['TR'])
+        # 确保分母非零
+        df_copy['TR_sum'] = df_copy['TR_sum'].replace(0, eps)
 
-        # 计算最终的Vortex指标
-        df['VI_plus'] = df['VM_plus_sum'] / df['TR_sum']
-        df['VI_minus'] = df['VM_minus_sum'] / df['TR_sum']
+        df_copy['VM_plus_sum'] = df_copy['VM_plus'].rolling(window=period).sum().fillna(df_copy['VM_plus'])
+        df_copy['VM_minus_sum'] = df_copy['VM_minus'].rolling(window=period).sum().fillna(df_copy['VM_minus'])
 
-        # 计算Vortex指标差值
-        df['VI_diff'] = df['VI_plus'] - df['VI_minus']
+        # 计算最终的Vortex指标，使用clip防止异常值
+        df_copy['VI_plus'] = (df_copy['VM_plus_sum'] / df_copy['TR_sum']).clip(0, 5)
+        df_copy['VI_minus'] = (df_copy['VM_minus_sum'] / df_copy['TR_sum']).clip(0, 5)
 
-        # 记录交叉信号
-        df['Vortex_Cross_Up'] = (
-                (df['VI_plus'] > df['VI_minus']) &
-                (df['VI_plus'].shift(1) <= df['VI_minus'].shift(1))
+        # 计算Vortex指标差值，用于评估趋势强度
+        df_copy['VI_diff'] = df_copy['VI_plus'] - df_copy['VI_minus']
+
+        # 记录交叉信号，确保值为0或1
+        df_copy['Vortex_Cross_Up'] = (
+                (df_copy['VI_plus'] > df_copy['VI_minus']) &
+                (df_copy['VI_plus'].shift(1) <= df_copy['VI_minus'].shift(1))
         ).astype(int)
 
-        df['Vortex_Cross_Down'] = (
-                (df['VI_plus'] < df['VI_minus']) &
-                (df['VI_plus'].shift(1) >= df['VI_minus'].shift(1))
+        df_copy['Vortex_Cross_Down'] = (
+                (df_copy['VI_plus'] < df_copy['VI_minus']) &
+                (df_copy['VI_plus'].shift(1) >= df_copy['VI_minus'].shift(1))
         ).astype(int)
+
+        # 填充NaN值
+        for col in ['VI_plus', 'VI_minus', 'VI_diff', 'Vortex_Cross_Up', 'Vortex_Cross_Down']:
+            if col in df_copy.columns:
+                df_copy[col] = df_copy[col].fillna(0)
 
         # 获取最新值并打印
-        latest_vi_plus = df['VI_plus'].iloc[-1]
-        latest_vi_minus = df['VI_minus'].iloc[-1]
-        latest_diff = df['VI_diff'].iloc[-1]
+        latest_vi_plus = df_copy['VI_plus'].iloc[-1]
+        latest_vi_minus = df_copy['VI_minus'].iloc[-1]
+        latest_diff = df_copy['VI_diff'].iloc[-1]
 
         # 确定趋势状态
         if latest_vi_plus > latest_vi_minus:
@@ -786,9 +977,21 @@ def calculate_vortex_indicator(df: pd.DataFrame, period: int = 14) -> pd.DataFra
             trend_state = "下降趋势"
             color = Colors.RED
 
+        # 计算趋势强度（虚拟货币市场优化）
+        trend_strength = abs(latest_diff) * 10  # 放大差值以更好地评估强度
+        strength_desc = ""
+        if trend_strength > 2.0:
+            strength_desc = "极强"
+        elif trend_strength > 1.0:
+            strength_desc = "强"
+        elif trend_strength > 0.5:
+            strength_desc = "中等"
+        else:
+            strength_desc = "弱"
+
         # 判断交叉信号
-        cross_up = df['Vortex_Cross_Up'].iloc[-1]
-        cross_down = df['Vortex_Cross_Down'].iloc[-1]
+        cross_up = df_copy['Vortex_Cross_Up'].iloc[-1]
+        cross_down = df_copy['Vortex_Cross_Down'].iloc[-1]
 
         cross_message = ""
         if cross_up:
@@ -798,18 +1001,22 @@ def calculate_vortex_indicator(df: pd.DataFrame, period: int = 14) -> pd.DataFra
 
         print_colored(
             f"Vortex指标: {color}VI+({latest_vi_plus:.4f}) VI-({latest_vi_minus:.4f}){Colors.RESET} "
-            f"差值: {latest_diff:.4f} - {trend_state} {cross_message}",
+            f"差值: {latest_diff:.4f} - {trend_state}({strength_desc}) {cross_message}",
             Colors.INFO
         )
+
+        # 将计算后的列复制回原始DataFrame
+        for col in ['VI_plus', 'VI_minus', 'VI_diff', 'Vortex_Cross_Up', 'Vortex_Cross_Down']:
+            df[col] = df_copy[col]
 
         # 清理中间计算列
         if 'TR' not in df.columns:  # 如果TR之前不存在，则删除
             df = df.drop(['TR'], axis=1)
-        df = df.drop(['VM_plus', 'VM_minus', 'TR_sum', 'VM_plus_sum', 'VM_minus_sum'], axis=1)
 
         return df
     except Exception as e:
         print_colored(f"❌ 计算Vortex指标失败: {e}", Colors.ERROR)
+        # 确保返回原始DataFrame，不影响后续计算
         return df
 
 

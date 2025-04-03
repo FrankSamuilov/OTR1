@@ -9,6 +9,7 @@ def calculate_quality_score(df, client=None, symbol=None, btc_df=None, config=No
     """
     计算0-10分的货币质量评分，10分表示低风险
     基于SMC策略（Smart Money Concept）和风险参数
+    增强版：添加指标共振与交互性评估
 
     参数:
         df (DataFrame): 包含价格和计算指标的数据
@@ -43,7 +44,7 @@ def calculate_quality_score(df, client=None, symbol=None, btc_df=None, config=No
     print(f"📈 {symbol} - 市场趋势: {trend}, 持续时间: {duration}分钟")
 
     # 稳定上升趋势得高分
-    if trend == "UP" and duration > 60:  # 超过1小时的上升趋势
+    if trend == "UP" and duration > 30:  # 缩短时间要求，从60分钟减至30分钟
         structure_score = 2.0
         print(f"✅ {symbol} - 稳定上升趋势，结构评分: 2.0")
     elif trend == "UP":
@@ -52,7 +53,7 @@ def calculate_quality_score(df, client=None, symbol=None, btc_df=None, config=No
     elif trend == "NEUTRAL":
         structure_score = 1.0
         print(f"⚖️ {symbol} - 中性趋势，结构评分: 1.0")
-    elif trend == "DOWN" and duration > 60:  # 明显下降趋势
+    elif trend == "DOWN" and duration > 30:  # 缩短时间要求
         structure_score = 0.5  # 风险较高
         print(f"⚠️ {symbol} - 明显下降趋势，结构评分: 0.5")
     else:
@@ -78,27 +79,45 @@ def calculate_quality_score(df, client=None, symbol=None, btc_df=None, config=No
         atr_ratio = atr / atr_mean if atr_mean > 0 else 1.0
         print(f"📊 {symbol} - 波动率比率: {atr_ratio:.2f}")
 
+        # 超级趋势评估
+        supertrend_aligned = False
+        if 'Supertrend_Direction' in df.columns:
+            st_direction = df['Supertrend_Direction'].iloc[-1]
+            supertrend_aligned = (st_direction > 0 and trend == "UP") or (st_direction < 0 and trend == "DOWN")
+            print(
+                f"📊 {symbol} - 超级趋势方向: {'上升' if st_direction > 0 else '下降'}, 与趋势一致: {supertrend_aligned}")
+
         # 订单块评估
         has_order_block = (volume_ratio > 1.3 and
                            abs(df['close'].iloc[-1] - df['close'].iloc[-2]) < atr)
+        print(f"📊 {symbol} - 订单块检测: {'有' if has_order_block else '无'}")
 
         metrics['volume_ratio'] = volume_ratio
         metrics['atr_ratio'] = atr_ratio
         metrics['has_order_block'] = has_order_block
+        metrics['supertrend_aligned'] = supertrend_aligned
 
         # 订单块评分
-        if has_order_block and obv_trend:
+        if has_order_block and obv_trend and supertrend_aligned:
             order_block_score = 2.0
-        elif has_order_block or obv_trend:
+            print(f"✅ {symbol} - 订单块+OBV+超级趋势完美匹配，评分: 2.0")
+        elif has_order_block and (obv_trend or supertrend_aligned):
             order_block_score = 1.5
-        elif volume_ratio > 0.8:
+            print(f"✅ {symbol} - 订单块部分匹配，评分: 1.5")
+        elif has_order_block or obv_trend:
             order_block_score = 1.0
+            print(f"⚖️ {symbol} - 有订单块或OBV趋势，评分: 1.0")
+        elif volume_ratio > 0.8:
+            order_block_score = 0.7
+            print(f"⚠️ {symbol} - 成交量尚可，评分: 0.7")
         else:
             order_block_score = 0.5
+            print(f"⚠️ {symbol} - 订单块评估不佳，评分: 0.5")
 
         # 波动性降分
         if atr_ratio > 1.5:  # 波动性高于平均的50%
             order_block_score *= 0.7  # 降低30%的评分
+            print(f"⚠️ {symbol} - 波动性过高，订单块评分降至: {order_block_score:.2f}")
 
         metrics['order_block_score'] = order_block_score
     except Exception as e:
@@ -112,6 +131,10 @@ def calculate_quality_score(df, client=None, symbol=None, btc_df=None, config=No
     try:
         swing_highs, swing_lows = find_swing_points(df)
         fib_levels = calculate_fibonacci_retracements(df)
+
+        print(f"📊 {symbol} - 发现摆动高点: {len(swing_highs)}个, 摆动低点: {len(swing_lows)}个")
+        if fib_levels:
+            print(f"📊 {symbol} - 斐波那契水平: {[round(level, 4) for level in fib_levels[:3]]}...")
 
         current_price = df['close'].iloc[-1]
 
@@ -130,6 +153,8 @@ def calculate_quality_score(df, client=None, symbol=None, btc_df=None, config=No
         support_distance = (current_price - current_support) / current_price
         resistance_distance = (current_resistance - current_price) / current_price
 
+        print(f"📊 {symbol} - 距离支撑位: {support_distance:.2%}, 距离阻力位: {resistance_distance:.2%}")
+
         # 检查价格与斐波那契回撤位的位置
         near_fib_support = False
         fib_support_level = 0
@@ -140,6 +165,7 @@ def calculate_quality_score(df, client=None, symbol=None, btc_df=None, config=No
                 if abs(current_price - level) / current_price < 0.01:  # 1%以内视为接近
                     near_fib_support = True
                     fib_support_level = i
+                    print(f"✅ {symbol} - 价格接近斐波那契水平 {i}: {level:.4f}")
                     break
 
         metrics['support_distance'] = support_distance
@@ -151,18 +177,23 @@ def calculate_quality_score(df, client=None, symbol=None, btc_df=None, config=No
         if near_fib_support:
             # 黄金分割较高位置得分更高
             sr_score = 2.0 - (fib_support_level * 0.3)  # 0.382得2.0分，0.618得1.7分
+            print(f"✅ {symbol} - 价格位于黄金分割位置，支撑阻力评分: {sr_score:.2f}")
         elif support_distance < 0.01 and resistance_distance > 0.05:
             # 接近支撑且远离阻力
             sr_score = 1.8
+            print(f"✅ {symbol} - 价格接近支撑且远离阻力，支撑阻力评分: 1.8")
         elif support_distance < 0.03:
             # 相对接近支撑
             sr_score = 1.5
+            print(f"✅ {symbol} - 价格相对接近支撑，支撑阻力评分: 1.5")
         elif resistance_distance < 0.03:
             # 相对接近阻力
             sr_score = 0.8
+            print(f"⚠️ {symbol} - 价格接近阻力，支撑阻力评分: 0.8")
         else:
             # 处于中间位置
             sr_score = 1.0
+            print(f"⚖️ {symbol} - 价格处于中间位置，支撑阻力评分: 1.0")
 
         metrics['sr_score'] = sr_score
     except Exception as e:
@@ -179,23 +210,73 @@ def calculate_quality_score(df, client=None, symbol=None, btc_df=None, config=No
         macd_signal = df['MACD_signal'].iloc[-1] if 'MACD_signal' in df.columns else 0
         macd_cross = macd > macd_signal
 
+        # 检查是否是最近的交叉
+        macd_recent_cross = False
+        if len(df) >= 3 and 'MACD' in df.columns and 'MACD_signal' in df.columns:
+            if (macd > macd_signal and
+                    df['MACD'].iloc[-2] <= df['MACD_signal'].iloc[-2]):
+                macd_recent_cross = True
+                print(f"📊 {symbol} - MACD最近发生金叉")
+            elif (macd < macd_signal and
+                  df['MACD'].iloc[-2] >= df['MACD_signal'].iloc[-2]):
+                macd_recent_cross = True
+                print(f"📊 {symbol} - MACD最近发生死叉")
+
+        print(f"📊 {symbol} - MACD: {macd:.6f}, Signal: {macd_signal:.6f}, 金叉: {macd_cross}")
+
         # RSI
         rsi = df['RSI'].iloc[-1] if 'RSI' in df.columns else 50
         rsi_healthy = 30 <= rsi <= 70
+        print(f"📊 {symbol} - RSI: {rsi:.2f}, 健康区间: {rsi_healthy}")
 
         # 均线
         ema5 = df['EMA5'].iloc[-1] if 'EMA5' in df.columns else 0
         ema20 = df['EMA20'].iloc[-1] if 'EMA20' in df.columns else 0
         price_above_ema = df['close'].iloc[-1] > ema20
 
+        # 均线交叉检查
+        ema_cross = False
+        if len(df) >= 3 and 'EMA5' in df.columns and 'EMA20' in df.columns:
+            if (ema5 > ema20 and
+                    df['EMA5'].iloc[-2] <= df['EMA20'].iloc[-2]):
+                ema_cross = True
+                print(f"📊 {symbol} - 短期均线上穿长期均线（金叉）")
+            elif (ema5 < ema20 and
+                  df['EMA5'].iloc[-2] >= df['EMA20'].iloc[-2]):
+                ema_cross = True
+                print(f"📊 {symbol} - 短期均线下穿长期均线（死叉）")
+
+        print(f"📊 {symbol} - EMA5: {ema5:.4f}, EMA20: {ema20:.4f}, 价格高于EMA20: {price_above_ema}")
+
         # 布林带
         bb_width = (df['BB_Upper'].iloc[-1] - df['BB_Lower'].iloc[-1]) / df['BB_Middle'].iloc[-1] if all(
             x in df.columns for x in ['BB_Upper', 'BB_Lower', 'BB_Middle']) else 0.1
 
+        # 布林带位置
+        if 'BB_Upper' in df.columns and 'BB_Lower' in df.columns and 'BB_Middle' in df.columns:
+            bb_position = (df['close'].iloc[-1] - df['BB_Lower'].iloc[-1]) / (
+                        df['BB_Upper'].iloc[-1] - df['BB_Lower'].iloc[-1])
+            bb_position_text = (
+                "上轨以上" if bb_position > 1 else
+                "上轨附近" if bb_position > 0.9 else
+                "上轨和中轨之间" if bb_position > 0.5 else
+                "中轨附近" if bb_position > 0.45 and bb_position < 0.55 else
+                "中轨和下轨之间" if bb_position > 0.1 else
+                "下轨附近" if bb_position > 0 else
+                "下轨以下"
+            )
+            print(f"📊 {symbol} - 布林带位置: {bb_position:.2f} ({bb_position_text})")
+            metrics['bb_position'] = bb_position
+            metrics['bb_position_text'] = bb_position_text
+
+        print(f"📊 {symbol} - 布林带宽度: {bb_width:.4f}")
+
         metrics['macd_cross'] = macd_cross
+        metrics['macd_recent_cross'] = macd_recent_cross
         metrics['rsi'] = rsi
         metrics['rsi_healthy'] = rsi_healthy
         metrics['price_above_ema'] = price_above_ema
+        metrics['ema_cross'] = ema_cross
         metrics['bb_width'] = bb_width
 
         # 技术指标评分
@@ -204,24 +285,31 @@ def calculate_quality_score(df, client=None, symbol=None, btc_df=None, config=No
         # MACD交叉向上且RSI健康 +1.0
         if macd_cross and rsi_healthy:
             tech_score += 1.0
+            print(f"✅ {symbol} - MACD金叉+RSI健康，技术加分: +1.0")
         # RSI健康但无交叉 +0.6
         elif rsi_healthy:
             tech_score += 0.6
+            print(f"✅ {symbol} - RSI健康，技术加分: +0.6")
         # RSI超买或超卖 -0.2
         else:
             tech_score -= 0.2
+            print(f"⚠️ {symbol} - RSI超买或超卖，技术减分: -0.2")
 
         # 价格在均线上方 +0.5
         if price_above_ema:
             tech_score += 0.5
+            print(f"✅ {symbol} - 价格在均线上方，技术加分: +0.5")
 
         # 考虑布林带宽度 (标准情况下分值0.5，宽度越小越好)
         if bb_width < 0.03:  # 非常紧缩，可能即将突破
             tech_score += 0.5
+            print(f"✅ {symbol} - 布林带紧缩，技术加分: +0.5")
         elif bb_width < 0.06:  # 较紧缩
             tech_score += 0.3
+            print(f"✅ {symbol} - 布林带较紧缩，技术加分: +0.3")
         elif bb_width > 0.08:  # 较宽，波动较大
             tech_score -= 0.2
+            print(f"⚠️ {symbol} - 布林带过宽，技术减分: -0.2")
 
         # Vortex指标评估 - 虚拟货币市场优化
         if 'VI_plus' in df.columns and 'VI_minus' in df.columns:
@@ -339,6 +427,7 @@ def calculate_quality_score(df, client=None, symbol=None, btc_df=None, config=No
             metrics['adx_value'] = adx
         else:
             print(f"📊 {symbol} - ADX: {adx:.2f} >= 20，非震荡市场")
+
 
     # 汇总得分
     quality_score = risk_score + structure_score + order_block_score + sr_score + tech_score + market_score
