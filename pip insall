@@ -1,0 +1,1 @@
+pip install numpy pandas scipy statsmodels tensorflow tf2onnx onnxruntime matplotlib python-binance requests flask flask-cors python-dotenv
