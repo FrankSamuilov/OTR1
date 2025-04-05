@@ -630,59 +630,188 @@ class EnhancedTradingBot:
         self.logger.info(f"新增{symbol} {position_side}持仓", extra=new_pos)
 
     def close_position(self, symbol, position_side=None):
-        """平仓指定货币对的持仓"""
+        """
+        平仓指定货币对的持仓，增强版本 - 修复平仓失败问题
+
+        参数:
+            symbol: 交易对符号
+            position_side: 持仓方向 ('LONG', 'SHORT', None=全部平仓)
+
+        返回:
+            success: 是否成功平仓
+            closed_positions: 已平仓的持仓信息列表
+        """
         try:
+            print(f"🔄 正在尝试平仓 {symbol} {position_side if position_side else '全部持仓'}")
+
+            # 获取当前持仓信息
             positions = self.client.futures_position_information(symbol=symbol)
+            if not positions:
+                print(f"⚠️ 未找到 {symbol} 的持仓信息")
+                return False, []
+
+            # 筛选有实际持仓量的记录
+            active_positions = [pos for pos in positions if abs(float(pos.get('positionAmt', 0))) > 0]
+            if not active_positions:
+                print(f"⚠️ {symbol} 没有活跃持仓")
+                return False, []
+
+            print(f"📊 {symbol} 找到 {len(active_positions)} 个活跃持仓")
+
+            # 跟踪已平仓的持仓
             closed_positions = []
+            success = False
 
-            for pos in positions:
+            for pos in active_positions:
                 amt = float(pos.get('positionAmt', 0))
-                if abs(amt) > 0:
-                    current_side = pos.get('positionSide', 'BOTH')
+                current_side = pos.get('positionSide', 'BOTH')
 
-                    # 如果指定了方向，只平仓该方向
-                    if position_side is not None and current_side != position_side:
-                        continue
+                # 如果指定了方向，只平仓该方向
+                if position_side is not None and current_side != position_side:
+                    print(f"➡️ 跳过 {symbol} {current_side} 持仓 (不匹配请求的方向 {position_side})")
+                    continue
 
-                    close_side = "SELL" if amt > 0 else "BUY"
+                # 确定平仓方向
+                close_side = "SELL" if amt > 0 else "BUY"
 
+                # 格式化数量，确保精度正确
+                quantity = abs(amt)
+
+                # 获取交易所数量精度信息
+                info = self.client.futures_exchange_info()
+                step_size = None
+
+                for item in info['symbols']:
+                    if item['symbol'] == symbol:
+                        for f in item['filters']:
+                            if f['filterType'] == 'LOT_SIZE':
+                                step_size = float(f['stepSize'])
+                                break
+                        break
+
+                # 应用精度
+                if step_size:
+                    precision = 0
+                    while step_size < 1:
+                        step_size *= 10
+                        precision += 1
+
+                    quantity_str = f"{quantity:.{precision}f}"
+                else:
+                    # 默认精度
+                    quantity_str = f"{quantity:.6f}"
+
+                print(f"🔄 执行平仓: {symbol} {current_side}, 方向: {close_side}, 数量: {quantity_str}")
+
+                try:
+                    # 创建市价平仓订单
                     order = self.client.futures_create_order(
                         symbol=symbol,
                         side=close_side,
                         type="MARKET",
-                        quantity=str(abs(amt)),
+                        quantity=quantity_str,
                         positionSide=current_side,
                         reduceOnly=True
                     )
 
+                    print(f"✅ {symbol} {current_side} 平仓成功! 订单ID: {order.get('orderId', 'unknown')}")
+
+                    # 记录平仓信息
                     closed_positions.append({
                         "symbol": symbol,
                         "position_side": current_side,
                         "close_side": close_side,
-                        "quantity": abs(amt),
+                        "quantity": quantity,
                         "order_id": order.get("orderId", "unknown")
                     })
 
-                    self.logger.info(f"{symbol} {current_side}平仓成功", extra={
-                        "quantity": abs(amt),
+                    success = True
+
+                    # 记录日志
+                    self.logger.info(f"{symbol} {current_side} 平仓成功", extra={
+                        "quantity": quantity,
                         "close_side": close_side,
                         "order_id": order.get("orderId", "unknown")
                     })
 
-            # 更新本地持仓记录
-            if position_side:
-                self.open_positions = [p for p in self.open_positions if
-                                       p["symbol"] != symbol or p["position_side"] != position_side]
-            else:
-                self.open_positions = [p for p in self.open_positions if p["symbol"] != symbol]
+                except Exception as e:
+                    error_msg = str(e)
+                    print(f"❌ {symbol} {current_side} 平仓失败: {error_msg}")
 
-            return len(closed_positions) > 0
+                    # 记录详细错误
+                    if "insufficient balance" in error_msg.lower():
+                        print(f"  原因: 账户余额不足")
+                    elif "lot size" in error_msg.lower():
+                        print(f"  原因: 订单大小不符合要求, 尝试调整精度")
+                    elif "precision" in error_msg.lower():
+                        print(f"  原因: 数量精度不正确")
+
+                    self.logger.error(f"{symbol} {current_side} 平仓失败", extra={"error": error_msg})
+
+                    # 尝试使用替代方法平仓 - 使用position_information中的精确数量
+                    try:
+                        print(f"🔄 尝试替代方法平仓: {symbol} {current_side}")
+
+                        # 重新获取持仓信息
+                        updated_pos = self.client.futures_position_information(symbol=symbol)
+                        matching_pos = [p for p in updated_pos if
+                                        p.get('positionSide') == current_side and float(p.get('positionAmt', 0)) != 0]
+
+                        if matching_pos:
+                            # 使用系统提供的精确数量
+                            precise_amt = matching_pos[0]['positionAmt']
+
+                            # 创建市价平仓订单，不转换数量格式
+                            order = self.client.futures_create_order(
+                                symbol=symbol,
+                                side=close_side,
+                                type="MARKET",
+                                quantity=str(abs(float(precise_amt))),
+                                positionSide=current_side,
+                                reduceOnly=True
+                            )
+
+                            print(f"✅ 替代方法平仓成功! 订单ID: {order.get('orderId', 'unknown')}")
+                            success = True
+
+                            # 记录平仓信息
+                            closed_positions.append({
+                                "symbol": symbol,
+                                "position_side": current_side,
+                                "close_side": close_side,
+                                "quantity": abs(float(precise_amt)),
+                                "order_id": order.get("orderId", "unknown")
+                            })
+
+                            self.logger.info(f"{symbol} {current_side} 替代方法平仓成功", extra={
+                                "quantity": abs(float(precise_amt)),
+                                "order_id": order.get("orderId", "unknown")
+                            })
+                        else:
+                            print(f"⚠️ 找不到匹配的持仓进行替代平仓")
+                    except Exception as alt_e:
+                        print(f"❌ 替代平仓方法也失败: {alt_e}")
+                        self.logger.error(f"{symbol} {current_side} 替代平仓失败", extra={"error": str(alt_e)})
+
+            # 更新本地持仓记录
+            if success:
+                if position_side:
+                    self.open_positions = [p for p in self.open_positions if
+                                           p["symbol"] != symbol or p.get("position_side") != position_side]
+                else:
+                    self.open_positions = [p for p in self.open_positions if p["symbol"] != symbol]
+
+                print(f"✅ 成功平仓 {len(closed_positions)} 个 {symbol} 持仓")
+
+            return success, closed_positions
+
         except Exception as e:
-            self.logger.error(f"{symbol}平仓失败: {e}")
-            return False
+            print(f"❌ {symbol} 平仓过程中发生错误: {e}")
+            self.logger.error(f"{symbol} 平仓过程发生错误", extra={"error": str(e)})
+            return False, []
 
     def manage_open_positions(self):
-        """管理现有持仓，包括止盈止损"""
+        """管理现有持仓，包括止盈止损 - 修复版"""
         self.load_existing_positions()
 
         if not self.open_positions:
@@ -706,13 +835,25 @@ class EnhancedTradingBot:
 
             if action_type == "take_profit":
                 self.logger.info(f"{symbol} {position_side}达到止盈条件, 利润: {profit_pct:.2%}")
-                self.close_position(symbol, position_side)
+                success, closed = self.close_position(symbol, position_side)
+                if success:
+                    print(f"✅ {symbol} {position_side} 止盈平仓成功!")
+                else:
+                    print(f"❌ {symbol} {position_side} 止盈平仓失败")
             elif action_type == "stop_loss":
                 self.logger.info(f"{symbol} {position_side}达到止损条件, 亏损: {profit_pct:.2%}")
-                self.close_position(symbol, position_side)
+                success, closed = self.close_position(symbol, position_side)
+                if success:
+                    print(f"✅ {symbol} {position_side} 止损平仓成功!")
+                else:
+                    print(f"❌ {symbol} {position_side} 止损平仓失败")
             elif action_type == "time_stop":
                 self.logger.info(f"{symbol} {position_side}持仓时间过长, 执行时间止损")
-                self.close_position(symbol, position_side)
+                success, closed = self.close_position(symbol, position_side)
+                if success:
+                    print(f"✅ {symbol} {position_side} 时间止损平仓成功!")
+                else:
+                    print(f"❌ {symbol} {position_side} 时间止损平仓失败")
 
         for pos in self.open_positions:
             symbol = pos["symbol"]
@@ -720,13 +861,14 @@ class EnhancedTradingBot:
             position_side = pos.get("position_side", "LONG")
             entry_price = pos["entry_price"]
             quantity = pos["quantity"]
+            holding_time = (current_time - pos["open_time"]) / 3600  # 小时
 
             # 获取当前价格
             try:
                 ticker = self.client.futures_symbol_ticker(symbol=symbol)
                 current_price = float(ticker['price'])
-            except:
-                print(f"⚠️ 无法获取 {symbol} 当前价格")
+            except Exception as e:
+                print(f"⚠️ 无法获取 {symbol} 当前价格: {e}")
                 continue
 
             # 计算盈亏
@@ -739,20 +881,46 @@ class EnhancedTradingBot:
             take_profit = pos.get("dynamic_take_profit", 0.06)
             stop_loss = pos.get("stop_loss", -0.03)
 
+            profit_color = Colors.GREEN if profit_pct >= 0 else Colors.RED
             print(
-                f"{symbol} {position_side}: 当前盈亏 {profit_pct:.2%}, 止盈线 {take_profit:.2%}, 止损线 {stop_loss:.2%}")
+                f"{symbol} {position_side}: 持仓 {holding_time:.2f}小时, 当前盈亏 {profit_color}{profit_pct:.2%}{Colors.RESET}, "
+                f"止盈线 {take_profit:.2%}, 止损线 {stop_loss:.2%}"
+            )
 
-            # 检查是否应该触发止盈止损
+            # 检查是否应该触发止盈止损，但尚未被自动触发
             if profit_pct >= take_profit:
-                print(f"⚠️ {symbol} {position_side} 应该触发止盈！")
+                print(f"⚠️ {symbol} {position_side} 已达止盈条件，正在手动平仓...")
+                success, closed = self.close_position(symbol, position_side)
+                if success:
+                    print(f"✅ {symbol} {position_side} 手动止盈平仓成功!")
+                else:
+                    print(f"❌ {symbol} {position_side} 手动止盈平仓失败")
             elif profit_pct <= stop_loss:
-                print(f"⚠️ {symbol} {position_side} 应该触发止损！")
+                print(f"⚠️ {symbol} {position_side} 已达止损条件，正在手动平仓...")
+                success, closed = self.close_position(symbol, position_side)
+                if success:
+                    print(f"✅ {symbol} {position_side} 手动止损平仓成功!")
+                else:
+                    print(f"❌ {symbol} {position_side} 手动止损平仓失败")
+            # 检查持仓时间是否过长 (超过24小时)
+            elif holding_time > 24 and profit_pct < 0:
+                print(f"⚠️ {symbol} {position_side} 持仓时间过长且处于亏损状态，正在手动平仓...")
+                success, closed = self.close_position(symbol, position_side)
+                if success:
+                    print(f"✅ {symbol} {position_side} 手动时间止损平仓成功!")
+                else:
+                    print(f"❌ {symbol} {position_side} 手动时间止损平仓失败")
+
+        # 重新加载持仓以确保数据最新
+        self.load_existing_positions()
 
         # 检查是否需要加仓
         self.check_add_position(account_balance)
 
         # 显示持仓状态
         self.display_positions_status()
+
+
 
     def check_add_position(self, account_balance):
         """检查是否有加仓机会"""
@@ -1139,8 +1307,8 @@ class EnhancedTradingBot:
                 time.sleep(30)
 
 if __name__ == "__main__":
-    API_KEY = "vVqjrSQv15ECZWTXtINNwiZ4AP4k7wHxMmkg3nrParKwJsD2K6MgKgBUJc0u4RIc"
-    API_SECRET = "a3G8a5z6oRSWW8jV15blKRovKnybvtS4FRCUn131mifzlEbQluJUM0llDXzkMY5K"
+    API_KEY = "lnfs30CvqF8cCIdRcIfW6kKnGGpLoRzTUrwdRslTX4e7a0O6OJ3SYsUT6gF1B26"
+    API_SECRET = "llSlxBLrrxh21ugMzli5x6NveNrwQyLBI7YEgTR4VOMyTmVP6V9uqmrN90hX10c"
 
     bot = EnhancedTradingBot(API_KEY, API_SECRET, CONFIG)
     bot.trade()
