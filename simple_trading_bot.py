@@ -25,8 +25,17 @@ import datetime
 import time
 from integration_module import calculate_enhanced_indicators, generate_trade_recommendation
 from multi_timeframe_module import MultiTimeframeCoordinator
+from EnhancedMTFCoordinator import EnhancedMTFCoordinator
+# 导入集成模块（这是最简单的方法，因为它整合了所有其他模块的功能）
+from integration_module import (
+    calculate_enhanced_indicators,
+    comprehensive_market_analysis,
+    generate_trade_recommendation
+)
 
 
+
+# 在文件开头导入所需的模块后，添加这个类定义
 class EnhancedTradingBot:
     def __init__(self, api_key: str, api_secret: str, config: dict):
         print("初始化 EnhancedTradingBot...")
@@ -51,6 +60,7 @@ class EnhancedTradingBot:
             os.makedirs(log_dir)
             print(f"已创建日志目录: {log_dir}")
 
+
         # 尝试启用双向持仓模式
         try:
             position_mode = self.client.futures_get_position_mode()
@@ -73,159 +83,253 @@ class EnhancedTradingBot:
 
         print(f"初始化完成，交易对: {self.config['TRADE_PAIRS']}")
 
+    def calculate_dynamic_order_amount(self, risk, account_balance):
+        """基于风险和账户余额计算适当的订单金额"""
+        # 基础订单百分比 - 默认账户的5%
+        base_pct = 5.0
 
-    def get_futures_balance(self):
-        """获取USDC期货账户余额"""
-        try:
-            assets = self.client.futures_account_balance()
-            for asset in assets:
-                if asset["asset"] == "USDC":
-                    return float(asset["balance"])
-            return 0.0
-        except Exception as e:
-            self.logger.error(f"获取期货余额失败: {e}")
-            return 0.0
+        # 根据风险调整订单百分比
+        if risk > 0.05:  # 高风险
+            adjusted_pct = base_pct * 0.6  # 减小到基础的60%
+        elif risk > 0.03:  # 中等风险
+            adjusted_pct = base_pct * 0.8  # 减小到基础的80%
+        elif risk < 0.01:  # 低风险
+            adjusted_pct = base_pct * 1.2  # 增加到基础的120%
+        else:
+            adjusted_pct = base_pct
 
-    def get_historical_data_with_cache(self, symbol, interval="15m", limit=200, force_refresh=False):
-        """获取历史数据，使用缓存减少API调用"""
-        cache_key = f"{symbol}_{interval}_{limit}"
-        current_time = time.time()
+        # 计算订单金额
+        order_amount = account_balance * (adjusted_pct / 100)
 
-        # 检查缓存是否存在且有效
-        if not force_refresh and cache_key in self.historical_data_cache:
-            cache_item = self.historical_data_cache[cache_key]
-            # 缓存保留10分钟
-            if current_time - cache_item['timestamp'] < 600:
-                self.logger.info(f"使用缓存数据: {symbol}")
-                return cache_item['data']
+        # 确保订单金额在合理范围内
+        min_amount = 5.0  # 最小5 USDC
+        max_amount = account_balance * 0.1  # 最大为账户10%
 
-        # 获取新数据
-        try:
-            df = get_historical_data(self.client, symbol)
-            if df is not None and not df.empty:
-                # 缓存数据
-                self.historical_data_cache[cache_key] = {
-                    'data': df,
-                    'timestamp': current_time
-                }
-                self.logger.info(f"获取并缓存新数据: {symbol}")
-                return df
-            else:
-                self.logger.warning(f"无法获取{symbol}的数据")
-                return None
-        except Exception as e:
-            self.logger.error(f"获取{symbol}历史数据失败: {e}")
-            return None
+        order_amount = max(min_amount, min(order_amount, max_amount))
 
-    def generate_trade_signal(self, df, symbol):
-        """基于SMC策略和多时间框架协调生成交易信号"""
-        df.name = symbol  # 设置名称以便在日志中引用
+        print_colored(f"动态订单金额: {order_amount:.2f} USDC ({adjusted_pct:.1f}% 账户余额)", Colors.INFO)
 
-        if df is None or len(df) < 20:
-            self.logger.warning(f"{symbol}数据不足，无法生成信号")
-            return "HOLD", 0
+        return order_amount
 
-        try:
-            # 计算指标
-            df = calculate_optimized_indicators(df)
-            if df is None or df.empty:
-                self.logger.warning(f"{symbol}指标计算失败")
-                return "HOLD", 0
+    def trade(self):
+        """主交易循环 - 集成增强版多时间框架分析"""
+        print("启动增强版多时间框架集成交易机器人...")
+        self.logger.info("增强版多时间框架集成交易机器人启动", extra={"version": "Enhanced-MTF-" + VERSION})
 
-            # 计算质量评分
-            quality_score, metrics = calculate_quality_score(df, self.client, symbol, None, self.config, self.logger)
-            print_colored(f"{symbol} 初始质量评分: {quality_score:.2f}", Colors.INFO)
-
-            # 使用多时间框架协调器
-            print_colored(f"🔄 对{symbol}执行多时间框架分析", Colors.BLUE + Colors.BOLD)
-
-            # 获取多时间框架分析的信号
-            signal, adjusted_score, details = self.mtf_coordinator.generate_signal(symbol, quality_score)
-
-            # 获取主导时间框架
-            primary_tf = details["primary_timeframe"]
-            print_colored(f"主导时间框架: {primary_tf}", Colors.INFO)
-
-            # 获取一致性信息
-            coherence = details["coherence"]
-            print_colored(
-                f"时间框架一致性: {coherence['agreement_level']} "
-                f"(得分: {coherence['coherence_score']:.1f}/100)",
-                Colors.INFO
-            )
-
-            # 获取当前价格和预测价格
+        while True:
             try:
-                current_data = self.client.futures_symbol_ticker(symbol=symbol)
-                current_price = float(current_data['price']) if current_data else None
+                self.trade_cycle += 1
+                print(f"\n======== 交易循环 #{self.trade_cycle} ========")
+                current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                print(f"当前时间: {current_time}")
 
-                predicted = self.predict_short_term_price(symbol, horizon_minutes=60)
+                # 获取账户余额
+                account_balance = self.get_futures_balance()
+                print(f"账户余额: {account_balance:.2f} USDC")
+                self.logger.info("账户余额", extra={"balance": account_balance})
 
-                # 计算预期波动幅度
-                price_volatility = 0
-                if current_price and predicted:
-                    price_volatility = abs(predicted - current_price) / current_price * 100
-                    print_colored(f"预测价格波动: {price_volatility:.2f}%", Colors.INFO)
+                if account_balance < self.config.get("MIN_MARGIN_BALANCE", 10):
+                    print(f"⚠️ 账户余额不足，最低要求: {self.config.get('MIN_MARGIN_BALANCE', 10)} USDC")
+                    self.logger.warning("账户余额不足", extra={"balance": account_balance,
+                                                               "min_required": self.config.get("MIN_MARGIN_BALANCE",
+                                                                                               10)})
+                    time.sleep(60)
+                    continue
+
+                # 管理现有持仓
+                self.manage_open_positions()
+
+                # 分析所有交易对并生成建议
+                trade_candidates = []
+                for symbol in self.config["TRADE_PAIRS"]:
+                    try:
+                        print(f"\n分析交易对: {symbol}")
+                        # 获取历史数据
+                        df = self.get_historical_data_with_cache(symbol, force_refresh=True)
+                        if df is None:
+                            print(f"❌ 无法获取{symbol}数据")
+                            continue
+
+                        # 使用新的信号生成函数
+                        signal, quality_score = self.generate_trade_signal(df, symbol)
+
+                        # 跳过保持信号
+                        if signal == "HOLD":
+                            print(f"⏸️ {symbol} 保持观望")
+                            continue
+
+                        # 检查原始信号是否为轻量级
+                        is_light = False
+                        # 临时获取原始信号
+                        _, _, details = self.mtf_coordinator.generate_signal(symbol, quality_score)
+                        raw_signal = details.get("coherence", {}).get("recommendation", "")
+                        if raw_signal.startswith("LIGHT_"):
+                            is_light = True
+                            print_colored(f"{symbol} 检测到轻量级信号，将使用较小仓位", Colors.YELLOW)
+
+                        # 获取当前价格
+                        try:
+                            ticker = self.client.futures_symbol_ticker(symbol=symbol)
+                            current_price = float(ticker['price'])
+                        except Exception as e:
+                            print(f"❌ 获取{symbol}价格失败: {e}")
+                            continue
+
+                        # 预测未来价格
+                        predicted = None
+                        if "price_prediction" in details and details["price_prediction"].get("valid", False):
+                            predicted = details["price_prediction"]["predicted_price"]
+                        else:
+                            predicted = self.predict_short_term_price(symbol, horizon_minutes=60)
+
+                        if predicted is None:
+                            predicted = current_price * (1.05 if signal == "BUY" else 0.95)  # 默认5%变动
+
+                        # 计算风险和交易金额
+                        risk = abs(current_price - predicted) / current_price
+
+                        # 计算交易金额时考虑轻量级信号
+                        candidate_amount = self.calculate_dynamic_order_amount(risk, account_balance)
+                        if is_light:
+                            candidate_amount *= 0.5  # 轻量级信号使用半仓
+                            print_colored(f"{symbol} 轻量级信号，使用50%标准仓位: {candidate_amount:.2f} USDC",
+                                          Colors.YELLOW)
+
+                        # 添加到候选列表
+                        candidate = {
+                            "symbol": symbol,
+                            "signal": signal,
+                            "quality_score": quality_score,
+                            "current_price": current_price,
+                            "predicted_price": predicted,
+                            "risk": risk,
+                            "amount": candidate_amount,
+                            "is_light": is_light
+                        }
+
+                        trade_candidates.append(candidate)
+
+                        print_colored(
+                            f"候选交易: {symbol} {signal}, "
+                            f"质量评分: {quality_score:.2f}, "
+                            f"预期波动: {risk * 100:.2f}%, "
+                            f"下单金额: {candidate_amount:.2f} USDC",
+                            Colors.GREEN if signal == "BUY" else Colors.RED
+                        )
+
+                    except Exception as e:
+                        self.logger.error(f"处理{symbol}时出错: {e}")
+                        print(f"❌ 处理{symbol}时出错: {e}")
+
+                # 按质量评分排序候选交易
+                trade_candidates.sort(key=lambda x: x["quality_score"], reverse=True)
+
+                # 显示详细交易计划
+                if trade_candidates:
+                    print("\n==== 详细交易计划 ====")
+                    for idx, candidate in enumerate(trade_candidates, 1):
+                        symbol = candidate["symbol"]
+                        signal = candidate["signal"]
+                        quality = candidate["quality_score"]
+                        current = candidate["current_price"]
+                        predicted = candidate["predicted_price"]
+                        amount = candidate["amount"]
+                        is_light = candidate["is_light"]
+
+                        side_color = Colors.GREEN if signal == "BUY" else Colors.RED
+                        position_type = "轻仓位" if is_light else "标准仓位"
+
+                        print(f"\n{idx}. {symbol} - {side_color}{signal}{Colors.RESET} ({position_type})")
+                        print(f"   质量评分: {quality:.2f}")
+                        print(f"   当前价格: {current:.6f}, 预测价格: {predicted:.6f}")
+                        print(f"   预期波动: {candidate['risk'] * 100:.2f}%")
+                        print(f"   下单金额: {amount:.2f} USDC")
+                else:
+                    print("\n本轮无交易候选")
+
+                # 执行交易
+                executed_count = 0
+                max_trades = min(self.config.get("MAX_PURCHASES_PER_ROUND", 3), len(trade_candidates))
+
+                for candidate in trade_candidates:
+                    if executed_count >= max_trades:
+                        break
+
+                    symbol = candidate["symbol"]
+                    signal = candidate["signal"]
+                    amount = candidate["amount"]
+                    quality_score = candidate["quality_score"]
+                    is_light = candidate["is_light"]
+
+                    print(f"\n🚀 执行交易: {symbol} {signal}, 金额: {amount:.2f} USDC{' (轻仓位)' if is_light else ''}")
+
+                    # 计算适合的杠杆水平
+                    leverage = self.calculate_leverage_from_quality(quality_score)
+                    if is_light:
+                        # 轻仓位降低杠杆
+                        leverage = max(1, int(leverage * 0.7))
+                        print_colored(f"轻仓位降低杠杆至 {leverage}倍", Colors.YELLOW)
+
+                    # 执行交易
+                    if self.place_futures_order_usdc(symbol, signal, amount, leverage):
+                        executed_count += 1
+                        print(f"✅ {symbol} {signal} 交易成功")
+                    else:
+                        print(f"❌ {symbol} {signal} 交易失败")
+
+                # 显示持仓卖出预测
+                self.display_position_sell_timing()
+
+                # 打印交易循环总结
+                print(f"\n==== 交易循环总结 ====")
+                print(f"分析交易对: {len(self.config['TRADE_PAIRS'])}个")
+                print(f"交易候选: {len(trade_candidates)}个")
+                print(f"执行交易: {executed_count}个")
+
+                # 循环间隔
+                sleep_time = 60
+                print(f"\n等待 {sleep_time} 秒进入下一轮...")
+                time.sleep(sleep_time)
+
+            except KeyboardInterrupt:
+                print("\n用户中断，退出程序")
+                self.logger.info("用户中断，程序结束")
+                break
             except Exception as e:
-                self.logger.error(f"获取{symbol}价格预测失败: {e}")
-                price_volatility = 0
-                current_price = None
-                predicted = None
+                self.logger.error(f"交易循环异常: {e}")
+                print(f"错误: {e}")
+                time.sleep(30)
 
-            # ===== 提高购买门槛 =====
-            # 1. 最小波动幅度要求
-            volatility_threshold = 2.0  # 最小波动幅度要求(%)
-            if price_volatility < volatility_threshold:
-                print_colored(f"❌ {symbol} 预期波动幅度({price_volatility:.2f}%)不足{volatility_threshold}%，不交易",
-                              Colors.WARNING)
-                return "HOLD", adjusted_score
+    def is_near_resistance(self, price, swing_highs, fib_levels, threshold=0.01):
+        """检查价格是否接近阻力位"""
+        # 检查摆动高点
+        for high in swing_highs:
+            if abs(price - high) / price < threshold:
+                return True
 
-            # 2. 时间框架一致性要求
-            coherence_threshold = 70.0  # 最小一致性评分要求
-            if coherence["coherence_score"] < coherence_threshold:
-                print_colored(
-                    f"❌ {symbol} 时间框架一致性({coherence['coherence_score']:.1f})不足{coherence_threshold}，不交易",
-                    Colors.WARNING)
-                return "HOLD", adjusted_score
+        # 检查斐波那契阻力位
+        if fib_levels and len(fib_levels) >= 3:
+            for level in fib_levels:
+                if abs(price - level) / price < threshold:
+                    return True
 
-            # 3. 质量评分门槛
-            quality_threshold = 7.5  # 高质量评分要求
-            if adjusted_score < quality_threshold and "BUY" in signal:
-                print_colored(f"❌ {symbol} 质量评分({adjusted_score:.2f})不足{quality_threshold}，不交易",
-                              Colors.WARNING)
-                return "HOLD", adjusted_score
-
-            # 4. 添加趋势强度门槛
-            if 'ADX' in df.columns:
-                adx = df['ADX'].iloc[-1]
-                if adx < 25:  # ADX低于25表示趋势不明显
-                    print_colored(f"❌ {symbol} ADX({adx:.2f})过低，趋势不明显，不交易",
-                                  Colors.WARNING)
-                    return "HOLD", adjusted_score
-
-            # 记录调整后的质量评分
-            print_colored(f"调整后质量评分: {adjusted_score:.2f}", Colors.INFO)
-
-            # 记录信号生成过程到日志
-            self.logger.info(f"{symbol} 信号生成", extra={
-                "original_score": quality_score,
-                "adjusted_score": adjusted_score,
-                "primary_timeframe": primary_tf,
-                "coherence_level": coherence["agreement_level"],
-                "coherence_score": coherence["coherence_score"],
-                "dominant_trend": coherence["dominant_trend"],
-                "signal": signal,
-                "timeframe_conflicts": coherence["trend_conflicts"],
-                "price_volatility": price_volatility
-            })
-
-            return signal, adjusted_score
-
-        except Exception as e:
-            self.logger.error(f"{symbol}生成信号失败: {e}")
-            return "HOLD", 0
+        return False
 
 
+    def is_near_support(self, price, swing_lows, fib_levels, threshold=0.01):
+        """检查价格是否接近支撑位"""
+        # 检查摆动低点
+        for low in swing_lows:
+            if abs(price - low) / price < threshold:
+                return True
+
+        # 检查斐波那契支撑位
+        if fib_levels and len(fib_levels) >= 3:
+            for level in fib_levels:
+                if abs(price - level) / price < threshold:
+                    return True
+
+        return False
 
     def place_hedge_orders(self, symbol, primary_side, quality_score):
         """
@@ -279,35 +383,131 @@ class EnhancedTradingBot:
             self.logger.warning(f"{symbol}未知交易方向: {primary_side}")
             return False
 
-    def is_near_support(self, price, swing_lows, fib_levels, threshold=0.01):
-        """检查价格是否接近支撑位"""
-        # 检查摆动低点
-        for low in swing_lows:
-            if abs(price - low) / price < threshold:
-                return True
+    def get_futures_balance(self):
+        """获取USDC期货账户余额"""
+        try:
+            assets = self.client.futures_account_balance()
+            for asset in assets:
+                if asset["asset"] == "USDC":
+                    return float(asset["balance"])
+            return 0.0
+        except Exception as e:
+            self.logger.error(f"获取期货余额失败: {e}")
+            return 0.0
 
-        # 检查斐波那契支撑位
-        if fib_levels and len(fib_levels) >= 3:
-            for level in fib_levels:
-                if abs(price - level) / price < threshold:
-                    return True
+    def get_historical_data_with_cache(self, symbol, interval="15m", limit=200, force_refresh=False):
+        """获取历史数据，使用缓存减少API调用"""
+        cache_key = f"{symbol}_{interval}_{limit}"
+        current_time = time.time()
 
-        return False
+        # 检查缓存是否存在且有效
+        if not force_refresh and cache_key in self.historical_data_cache:
+            cache_item = self.historical_data_cache[cache_key]
+            # 缓存保留10分钟
+            if current_time - cache_item['timestamp'] < 600:
+                self.logger.info(f"使用缓存数据: {symbol}")
+                return cache_item['data']
 
-    def is_near_resistance(self, price, swing_highs, fib_levels, threshold=0.01):
-        """检查价格是否接近阻力位"""
-        # 检查摆动高点
-        for high in swing_highs:
-            if abs(price - high) / price < threshold:
-                return True
+        # 获取新数据
+        try:
+            df = get_historical_data(self.client, symbol)
+            if df is not None and not df.empty:
+                # 缓存数据
+                self.historical_data_cache[cache_key] = {
+                    'data': df,
+                    'timestamp': current_time
+                }
+                self.logger.info(f"获取并缓存新数据: {symbol}")
+                return df
+            else:
+                self.logger.warning(f"无法获取{symbol}的数据")
+                return None
+        except Exception as e:
+            self.logger.error(f"获取{symbol}历史数据失败: {e}")
+            return None
 
-        # 检查斐波那契阻力位
-        if fib_levels and len(fib_levels) >= 3:
-            for level in fib_levels:
-                if abs(price - level) / price < threshold:
-                    return True
 
-        return False
+def generate_trade_signal(self, df, symbol):
+    """基于SMC策略和增强多时间框架协调生成交易信号"""
+    df.name = symbol  # 设置名称以便在日志中引用
+
+    if df is None or len(df) < 20:
+        self.logger.warning(f"{symbol}数据不足，无法生成信号")
+        return "HOLD", 0
+
+    try:
+        # 计算指标
+        df = calculate_optimized_indicators(df)
+        if df is None or df.empty:
+            self.logger.warning(f"{symbol}指标计算失败")
+            return "HOLD", 0
+
+        # 计算质量评分
+        quality_score, metrics = calculate_quality_score(df, self.client, symbol, None, self.config, self.logger)
+        print_colored(f"{symbol} 初始质量评分: {quality_score:.2f}", Colors.INFO)
+
+        # 使用增强版多时间框架协调器
+        print_colored(f"🔄 对{symbol}执行增强版多时间框架分析", Colors.BLUE + Colors.BOLD)
+
+        # 检查是否有等待中的入场机会
+        pending_entry = self.mtf_coordinator.check_pending_entries(symbol)
+        if pending_entry["should_enter"]:
+            return pending_entry["signal"], pending_entry["quality_score"]
+
+        # 获取多时间框架分析的信号
+        signal, adjusted_score, details = self.mtf_coordinator.generate_signal(symbol, quality_score)
+
+        # 获取主导时间框架
+        primary_tf = details["primary_timeframe"]
+        print_colored(f"主导时间框架: {primary_tf}", Colors.INFO)
+
+        # 获取一致性信息
+        coherence = details["coherence"]
+        print_colored(
+            f"时间框架一致性: {coherence['agreement_level']} "
+            f"(得分: {coherence['coherence_score']:.1f}/100)",
+            Colors.INFO
+        )
+
+        # 短期价格预测
+        if "price_prediction" in details and details["price_prediction"].get("valid", False):
+            price_pred = details["price_prediction"]
+            change_str = f"{price_pred['change_pct']:+.2f}%"
+            change_color = Colors.GREEN if price_pred['change_pct'] > 0 else Colors.RED
+            print_colored(
+                f"价格预测: {price_pred['predicted_price']:.6f} ({change_color}{change_str}{Colors.RESET})",
+                Colors.INFO
+            )
+
+        # 记录调整后的质量评分
+        print_colored(f"调整后质量评分: {adjusted_score:.2f}", Colors.INFO)
+
+        # 记录信号生成过程到日志
+        self.logger.info(f"{symbol} 信号生成", extra={
+            "original_score": quality_score,
+            "adjusted_score": adjusted_score,
+            "primary_timeframe": primary_tf,
+            "coherence_level": coherence["agreement_level"],
+            "coherence_score": coherence["coherence_score"],
+            "dominant_trend": coherence["dominant_trend"],
+            "signal": signal,
+        })
+
+        # 将NEUTRAL转为HOLD以保持兼容性
+        final_signal = "HOLD" if signal == "NEUTRAL" else signal
+        # 处理LIGHT_UP和LIGHT_DOWN信号
+        if signal == "LIGHT_UP":
+            final_signal = "BUY"
+        elif signal == "LIGHT_DOWN":
+            final_signal = "SELL"
+
+        return final_signal, adjusted_score
+
+    except Exception as e:
+        self.logger.error(f"{symbol}生成信号失败: {e}")
+        return "HOLD", 0
+
+
 
     def predict_short_term_price(self, symbol, horizon_minutes=60):
         """预测短期价格走势"""
@@ -358,6 +558,7 @@ class EnhancedTradingBot:
         except Exception as e:
             self.logger.error(f"{symbol}价格预测失败: {e}")
             return None
+
 
     def place_hedge_orders(self, symbol, primary_side, quality_score):
         """根据质量评分和信号放置订单，支持双向持仓"""
@@ -810,7 +1011,9 @@ class EnhancedTradingBot:
             self.logger.error(f"{symbol} 平仓过程发生错误", extra={"error": str(e)})
             return False, []
 
+
     def manage_open_positions(self):
+
         """管理现有持仓，包括止盈止损 - 修复版"""
         self.load_existing_positions()
 
@@ -1134,181 +1337,10 @@ class EnhancedTradingBot:
 
         print("-" * 50)
 
-    def trade(self):
-        """主交易循环 - 集成多时间框架分析"""
-        print("启动多时间框架集成交易机器人...")
-        self.logger.info("多时间框架集成交易机器人启动", extra={"version": "MTF-" + VERSION})
-
-        while True:
-            try:
-                self.trade_cycle += 1
-                print(f"\n======== 交易循环 #{self.trade_cycle} ========")
-                current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                print(f"当前时间: {current_time}")
-
-                # 获取账户余额
-                account_balance = self.get_futures_balance()
-                print(f"账户余额: {account_balance:.2f} USDC")
-                self.logger.info("账户余额", extra={"balance": account_balance})
-
-                if account_balance < self.config.get("MIN_MARGIN_BALANCE", 10):
-                    print(f"⚠️ 账户余额不足，最低要求: {self.config.get('MIN_MARGIN_BALANCE', 10)} USDC")
-                    self.logger.warning("账户余额不足", extra={"balance": account_balance,
-                                                               "min_required": self.config.get("MIN_MARGIN_BALANCE",
-                                                                                               10)})
-                    time.sleep(60)
-                    continue
-
-                # 管理现有持仓
-                self.manage_open_positions()
-
-                # 分析所有交易对并生成建议
-                trade_candidates = []
-                for symbol in self.config["TRADE_PAIRS"]:
-                    try:
-                        print(f"\n分析交易对: {symbol}")
-                        # 获取历史数据
-                        df = self.get_historical_data_with_cache(symbol, force_refresh=True)
-                        if df is None:
-                            print(f"❌ 无法获取{symbol}数据")
-                            continue
-
-                        # 使用新的信号生成函数
-                        signal, quality_score = self.generate_trade_signal(df, symbol)
-
-                        # 跳过保持信号
-                        if signal == "HOLD":
-                            print(f"⏸️ {symbol} 保持观望")
-                            continue
-
-                        # 获取当前价格
-                        try:
-                            ticker = self.client.futures_symbol_ticker(symbol=symbol)
-                            current_price = float(ticker['price'])
-                        except Exception as e:
-                            print(f"❌ 获取{symbol}价格失败: {e}")
-                            continue
-
-                        # 预测未来价格
-                        predicted = self.predict_short_term_price(symbol, horizon_minutes=60)
-                        if predicted is None:
-                            predicted = current_price * (1.05 if signal == "BUY" else 0.95)  # 默认5%变动
-
-                        # 计算风险和交易金额
-                        risk = abs(current_price - predicted) / current_price
-
-                        # 处理轻量级信号
-                        if signal.startswith("LIGHT_"):
-                            actual_signal = signal.replace("LIGHT_", "")
-                            candidate_amount = self.calculate_dynamic_order_amount(risk, account_balance) * 0.5  # 半仓
-                            print_colored(f"{symbol} 轻仓位{actual_signal}信号，使用50%标准仓位", Colors.YELLOW)
-                        else:
-                            actual_signal = signal
-                            candidate_amount = self.calculate_dynamic_order_amount(risk, account_balance)
-
-                        # 添加到候选列表
-                        candidate = {
-                            "symbol": symbol,
-                            "signal": actual_signal,
-                            "quality_score": quality_score,
-                            "current_price": current_price,
-                            "predicted_price": predicted,
-                            "risk": risk,
-                            "amount": candidate_amount,
-                            "is_light": signal.startswith("LIGHT_")
-                        }
-
-                        trade_candidates.append(candidate)
-
-                        print_colored(
-                            f"候选交易: {symbol} {actual_signal}, "
-                            f"质量评分: {quality_score:.2f}, "
-                            f"预期波动: {risk * 100:.2f}%, "
-                            f"下单金额: {candidate_amount:.2f} USDC",
-                            Colors.GREEN if actual_signal == "BUY" else Colors.RED
-                        )
-
-                    except Exception as e:
-                        self.logger.error(f"处理{symbol}时出错: {e}")
-                        print(f"❌ 处理{symbol}时出错: {e}")
-
-                # 按质量评分排序候选交易
-                trade_candidates.sort(key=lambda x: x["quality_score"], reverse=True)
-
-                # 显示详细交易计划
-                if trade_candidates:
-                    print("\n==== 详细交易计划 ====")
-                    for idx, candidate in enumerate(trade_candidates, 1):
-                        symbol = candidate["symbol"]
-                        signal = candidate["signal"]
-                        quality = candidate["quality_score"]
-                        current = candidate["current_price"]
-                        predicted = candidate["predicted_price"]
-                        amount = candidate["amount"]
-                        is_light = candidate["is_light"]
-
-                        side_color = Colors.GREEN if signal == "BUY" else Colors.RED
-                        position_type = "轻仓位" if is_light else "标准仓位"
-
-                        print(f"\n{idx}. {symbol} - {side_color}{signal}{Colors.RESET} ({position_type})")
-                        print(f"   质量评分: {quality:.2f}")
-                        print(f"   当前价格: {current:.6f}, 预测价格: {predicted:.6f}")
-                        print(f"   预期波动: {candidate['risk'] * 100:.2f}%")
-                        print(f"   下单金额: {amount:.2f} USDC")
-                else:
-                    print("\n本轮无交易候选")
-
-                # 执行交易
-                executed_count = 0
-                max_trades = min(self.config.get("MAX_PURCHASES_PER_ROUND", 3), len(trade_candidates))
-
-                for candidate in trade_candidates:
-                    if executed_count >= max_trades:
-                        break
-
-                    symbol = candidate["symbol"]
-                    signal = candidate["signal"]
-                    amount = candidate["amount"]
-                    quality_score = candidate["quality_score"]
-
-                    print(f"\n🚀 执行交易: {symbol} {signal}, 金额: {amount:.2f} USDC")
-
-                    # 计算适合的杠杆水平
-                    leverage = self.calculate_leverage_from_quality(quality_score)
-
-                    # 执行交易
-                    if self.place_futures_order_usdc(symbol, signal, amount, leverage):
-                        executed_count += 1
-                        print(f"✅ {symbol} {signal} 交易成功")
-                    else:
-                        print(f"❌ {symbol} {signal} 交易失败")
-
-                # 显示持仓卖出预测
-                self.display_position_sell_timing()
-
-                # 打印交易循环总结
-                print(f"\n==== 交易循环总结 ====")
-                print(f"分析交易对: {len(self.config['TRADE_PAIRS'])}个")
-                print(f"交易候选: {len(trade_candidates)}个")
-                print(f"执行交易: {executed_count}个")
-
-                # 循环间隔
-                sleep_time = 60
-                print(f"\n等待 {sleep_time} 秒进入下一轮...")
-                time.sleep(sleep_time)
-
-            except KeyboardInterrupt:
-                print("\n用户中断，退出程序")
-                self.logger.info("用户中断，程序结束")
-                break
-            except Exception as e:
-                self.logger.error(f"交易循环异常: {e}")
-                print(f"错误: {e}")
-                time.sleep(30)
 
 if __name__ == "__main__":
-    API_KEY = "lnfs30CvqF8cCIdRcIfW6kKnGGpLoRzTUrwdRslTX4e7a0O6OJ3SYsUT6gF1B26"
-    API_SECRET = "llSlxBLrrxh21ugMzli5x6NveNrwQyLBI7YEgTR4VOMyTmVP6V9uqmrN90hX10c"
+    API_KEY = "lnfs30CvqF8cCIdRcIfW6kKnGGpLoRzTUrwdRslTX4e7a0O6OJ3SYsUT6gF1B26W"
+    API_SECRET = "llSlxBLrrxh21ugMzli5x6NveNrwQyLBI7YEgTR4VOMyTmVP6V9uqmrN90hX10cn"
 
     bot = EnhancedTradingBot(API_KEY, API_SECRET, CONFIG)
     bot.trade()
