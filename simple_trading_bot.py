@@ -426,89 +426,6 @@ class EnhancedTradingBot:
             self.logger.error(f"获取{symbol}历史数据失败: {e}")
             return None
 
-
-def generate_trade_signal(self, df, symbol):
-    """基于SMC策略和增强多时间框架协调生成交易信号"""
-    df.name = symbol  # 设置名称以便在日志中引用
-
-    if df is None or len(df) < 20:
-        self.logger.warning(f"{symbol}数据不足，无法生成信号")
-        return "HOLD", 0
-
-    try:
-        # 计算指标
-        df = calculate_optimized_indicators(df)
-        if df is None or df.empty:
-            self.logger.warning(f"{symbol}指标计算失败")
-            return "HOLD", 0
-
-        # 计算质量评分
-        quality_score, metrics = calculate_quality_score(df, self.client, symbol, None, self.config, self.logger)
-        print_colored(f"{symbol} 初始质量评分: {quality_score:.2f}", Colors.INFO)
-
-        # 使用增强版多时间框架协调器
-        print_colored(f"🔄 对{symbol}执行增强版多时间框架分析", Colors.BLUE + Colors.BOLD)
-
-        # 检查是否有等待中的入场机会
-        pending_entry = self.mtf_coordinator.check_pending_entries(symbol)
-        if pending_entry["should_enter"]:
-            return pending_entry["signal"], pending_entry["quality_score"]
-
-        # 获取多时间框架分析的信号
-        signal, adjusted_score, details = self.mtf_coordinator.generate_signal(symbol, quality_score)
-
-        # 获取主导时间框架
-        primary_tf = details["primary_timeframe"]
-        print_colored(f"主导时间框架: {primary_tf}", Colors.INFO)
-
-        # 获取一致性信息
-        coherence = details["coherence"]
-        print_colored(
-            f"时间框架一致性: {coherence['agreement_level']} "
-            f"(得分: {coherence['coherence_score']:.1f}/100)",
-            Colors.INFO
-        )
-
-        # 短期价格预测
-        if "price_prediction" in details and details["price_prediction"].get("valid", False):
-            price_pred = details["price_prediction"]
-            change_str = f"{price_pred['change_pct']:+.2f}%"
-            change_color = Colors.GREEN if price_pred['change_pct'] > 0 else Colors.RED
-            print_colored(
-                f"价格预测: {price_pred['predicted_price']:.6f} ({change_color}{change_str}{Colors.RESET})",
-                Colors.INFO
-            )
-
-        # 记录调整后的质量评分
-        print_colored(f"调整后质量评分: {adjusted_score:.2f}", Colors.INFO)
-
-        # 记录信号生成过程到日志
-        self.logger.info(f"{symbol} 信号生成", extra={
-            "original_score": quality_score,
-            "adjusted_score": adjusted_score,
-            "primary_timeframe": primary_tf,
-            "coherence_level": coherence["agreement_level"],
-            "coherence_score": coherence["coherence_score"],
-            "dominant_trend": coherence["dominant_trend"],
-            "signal": signal,
-        })
-
-        # 将NEUTRAL转为HOLD以保持兼容性
-        final_signal = "HOLD" if signal == "NEUTRAL" else signal
-        # 处理LIGHT_UP和LIGHT_DOWN信号
-        if signal == "LIGHT_UP":
-            final_signal = "BUY"
-        elif signal == "LIGHT_DOWN":
-            final_signal = "SELL"
-
-        return final_signal, adjusted_score
-
-    except Exception as e:
-        self.logger.error(f"{symbol}生成信号失败: {e}")
-        return "HOLD", 0
-
-
-
     def predict_short_term_price(self, symbol, horizon_minutes=60):
         """预测短期价格走势"""
         df = self.get_historical_data_with_cache(symbol)
@@ -559,6 +476,85 @@ def generate_trade_signal(self, df, symbol):
             self.logger.error(f"{symbol}价格预测失败: {e}")
             return None
 
+    def generate_trade_signal(self, df, symbol):
+        """基于SMC策略和增强多时间框架协调生成交易信号"""
+        df.name = symbol  # 设置名称以便在日志中引用
+
+        if df is None or len(df) < 20:
+            self.logger.warning(f"{symbol}数据不足，无法生成信号")
+            return "HOLD", 0
+
+        try:
+            # 计算指标
+            df = calculate_optimized_indicators(df)
+            if df is None or df.empty:
+                self.logger.warning(f"{symbol}指标计算失败")
+                return "HOLD", 0
+
+            # 计算质量评分
+            quality_score, metrics = calculate_quality_score(df, self.client, symbol, None, self.config, self.logger)
+            print_colored(f"{symbol} 初始质量评分: {quality_score:.2f}", Colors.INFO)
+
+            # 使用增强版多时间框架协调器
+            print_colored(f"🔄 对{symbol}执行增强版多时间框架分析", Colors.BLUE + Colors.BOLD)
+
+            # 检查是否有等待中的入场机会
+            pending_entry = self.mtf_coordinator.check_pending_entries(symbol)
+            if pending_entry["should_enter"]:
+                return pending_entry["signal"], pending_entry["quality_score"]
+
+            # 获取多时间框架分析的信号
+            signal, adjusted_score, details = self.mtf_coordinator.generate_signal(symbol, quality_score)
+
+            # 获取主导时间框架
+            primary_tf = details["primary_timeframe"]
+            print_colored(f"主导时间框架: {primary_tf}", Colors.INFO)
+
+            # 获取一致性信息
+            coherence = details["coherence"]
+            print_colored(
+                f"时间框架一致性: {coherence['agreement_level']} "
+                f"(得分: {coherence['coherence_score']:.1f}/100)",
+                Colors.INFO
+            )
+
+            # 短期价格预测
+            if "price_prediction" in details and details["price_prediction"].get("valid", False):
+                price_pred = details["price_prediction"]
+                change_str = f"{price_pred['change_pct']:+.2f}%"
+                change_color = Colors.GREEN if price_pred['change_pct'] > 0 else Colors.RED
+                print_colored(
+                    f"价格预测: {price_pred['predicted_price']:.6f} ({change_color}{change_str}{Colors.RESET})",
+                    Colors.INFO
+                )
+
+            # 记录调整后的质量评分
+            print_colored(f"调整后质量评分: {adjusted_score:.2f}", Colors.INFO)
+
+            # 记录信号生成过程到日志
+            self.logger.info(f"{symbol} 信号生成", extra={
+                "original_score": quality_score,
+                "adjusted_score": adjusted_score,
+                "primary_timeframe": primary_tf,
+                "coherence_level": coherence["agreement_level"],
+                "coherence_score": coherence["coherence_score"],
+                "dominant_trend": coherence["dominant_trend"],
+                "signal": signal,
+            })
+
+            # 将NEUTRAL转为HOLD以保持兼容性
+            final_signal = "HOLD" if signal == "NEUTRAL" else signal
+            # 处理LIGHT_UP和LIGHT_DOWN信号
+            if signal == "LIGHT_UP":
+                final_signal = "BUY"
+            elif signal == "LIGHT_DOWN":
+                final_signal = "SELL"
+
+            return final_signal, adjusted_score
+
+        except Exception as e:
+            self.logger.error(f"{symbol}生成信号失败: {e}")
+            return "HOLD", 0
 
     def place_hedge_orders(self, symbol, primary_side, quality_score):
         """根据质量评分和信号放置订单，支持双向持仓"""
@@ -1013,7 +1009,6 @@ def generate_trade_signal(self, df, symbol):
 
 
     def manage_open_positions(self):
-
         """管理现有持仓，包括止盈止损 - 修复版"""
         self.load_existing_positions()
 
@@ -1122,8 +1117,6 @@ def generate_trade_signal(self, df, symbol):
 
         # 显示持仓状态
         self.display_positions_status()
-
-
 
     def check_add_position(self, account_balance):
         """检查是否有加仓机会"""
@@ -1305,6 +1298,7 @@ def generate_trade_signal(self, df, symbol):
 
         print("-" * 70)
 
+
     def display_quality_scores(self):
         """显示所有交易对的质量评分"""
         print("\n==== 质量评分排名 ====")
@@ -1318,13 +1312,15 @@ def generate_trade_signal(self, df, symbol):
                 continue
 
             df = calculate_optimized_indicators(df)
-            quality_score, metrics = calculate_quality_score(df, self.client, symbol, None, self.config, self.logger)
+            quality_score, metrics = calculate_quality_score(df, self.client, symbol, None, self.config,
+                                                             self.logger)
 
             trend = metrics.get("trend", "NEUTRAL")
 
             # 获取相似度信息
             similarity_info = self.similar_patterns_history.get(symbol, {"max_similarity": 0, "is_similar": False})
-            similarity_pct = round(similarity_info["max_similarity"] * 100, 1) if similarity_info["is_similar"] else 0
+            similarity_pct = round(similarity_info["max_similarity"] * 100, 1) if similarity_info[
+                "is_similar"] else 0
 
             scores.append((symbol, quality_score, trend, similarity_pct))
 
@@ -1336,7 +1332,6 @@ def generate_trade_signal(self, df, symbol):
             print(f"{symbol:<10} {score:<6.2f} {trend:<8} {backtest:<8} {similarity_pct:<12.1f}%")
 
         print("-" * 50)
-
 
 if __name__ == "__main__":
     API_KEY = "lnfs30CvqF8cCIdRcIfW6kKnGGpLoRzTUrwdRslTX4e7a0O6OJ3SYsUT6gF1B26W"
