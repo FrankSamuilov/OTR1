@@ -855,8 +855,8 @@ def calculate_indicator_resonance(df: pd.DataFrame) -> Dict[str, Any]:
         elif vi_plus < vi_minus and macd < signal:
             resonance["sell_confidence"] += 0.5
             resonance["sell_indicators"].append("Vortex+MACD协同(+0.5)")
-
     # Vortex + Supertrend协同
+
     if 'VI_plus' in df.columns and 'Supertrend_Direction' in df.columns:
         vi_plus = df['VI_plus'].iloc[-1]
         vi_minus = df['VI_minus'].iloc[-1]
@@ -894,7 +894,7 @@ def calculate_indicator_resonance(df: pd.DataFrame) -> Dict[str, Any]:
 
 def calculate_vortex_indicator(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
     """
-    计算Vortex指标 - 增强数值稳定性版本
+    计算Vortex指标 - 修复版，解决数值为0问题
 
     参数:
         df: 包含OHLC数据的DataFrame
@@ -911,58 +911,71 @@ def calculate_vortex_indicator(df: pd.DataFrame, period: int = 14) -> pd.DataFra
         # 创建副本防止修改原始数据
         df_copy = df.copy()
 
+        # 确保所有必要的数据都是数值类型
+        for col in ['high', 'low', 'close']:
+            if col in df_copy.columns:
+                df_copy[col] = pd.to_numeric(df_copy[col], errors='coerce')
+
         # 计算真实范围 (True Range)，确保有最小值避免除零
         eps = 1e-10  # 极小值，防止除零
 
+        # 使用已有的ATR或计算TR
         if 'ATR' in df_copy.columns:
-            df_copy['TR'] = df_copy['ATR'].copy()
+            # 如果已有ATR，直接乘以14（默认ATR周期）得到TR总和
+            df_copy['TR'] = df_copy['ATR'] * 14
         else:
-            df_copy['TR'] = np.maximum(
-                np.maximum(
-                    df_copy['high'] - df_copy['low'],
-                    abs(df_copy['high'] - df_copy['close'].shift(1))
-                ),
-                abs(df_copy['low'] - df_copy['close'].shift(1))
-            )
-            # 确保TR不为零
-            df_copy['TR'] = df_copy['TR'].replace(0, eps)
+            # 手动计算TR
+            high_low = df_copy['high'] - df_copy['low']
+            high_close = abs(df_copy['high'] - df_copy['close'].shift(1))
+            low_close = abs(df_copy['low'] - df_copy['close'].shift(1))
+
+            # 使用maximum函数处理NaN值
+            TR1 = pd.DataFrame({'hl': high_low, 'hc': high_close, 'lc': low_close})
+            df_copy['TR'] = TR1.max(axis=1)
+
+        # 确保TR不为零
+        df_copy['TR'] = df_copy['TR'].replace(0, eps)
 
         # 计算VM+ (上升趋势的动量)
-        df_copy['VM_plus'] = abs(df_copy['high'] - df_copy['low'].shift(1)).fillna(0)
+        df_copy['VM_plus'] = abs(df_copy['high'] - df_copy['low'].shift(1))
 
         # 计算VM- (下降趋势的动量)
-        df_copy['VM_minus'] = abs(df_copy['low'] - df_copy['high'].shift(1)).fillna(0)
+        df_copy['VM_minus'] = abs(df_copy['low'] - df_copy['high'].shift(1))
 
-        # 计算周期内的总和，确保填充NaN值
-        df_copy['TR_sum'] = df_copy['TR'].rolling(window=period).sum().fillna(df_copy['TR'])
+        # 填充NaN值
+        df_copy['VM_plus'] = df_copy['VM_plus'].fillna(0)
+        df_copy['VM_minus'] = df_copy['VM_minus'].fillna(0)
+
+        # 计算周期内的总和
+        df_copy['TR_sum'] = df_copy['TR'].rolling(window=period).sum()
+        df_copy['VM_plus_sum'] = df_copy['VM_plus'].rolling(window=period).sum()
+        df_copy['VM_minus_sum'] = df_copy['VM_minus'].rolling(window=period).sum()
+
+        # 填充前period行的NaN值，使用后向填充
+        df_copy['TR_sum'] = df_copy['TR_sum'].fillna(df_copy['TR'])
+        df_copy['VM_plus_sum'] = df_copy['VM_plus_sum'].fillna(df_copy['VM_plus'])
+        df_copy['VM_minus_sum'] = df_copy['VM_minus_sum'].fillna(df_copy['VM_minus'])
+
         # 确保分母非零
         df_copy['TR_sum'] = df_copy['TR_sum'].replace(0, eps)
 
-        df_copy['VM_plus_sum'] = df_copy['VM_plus'].rolling(window=period).sum().fillna(df_copy['VM_plus'])
-        df_copy['VM_minus_sum'] = df_copy['VM_minus'].rolling(window=period).sum().fillna(df_copy['VM_minus'])
-
-        # 计算最终的Vortex指标，使用clip防止异常值
+        # 计算最终的Vortex指标
         df_copy['VI_plus'] = (df_copy['VM_plus_sum'] / df_copy['TR_sum']).clip(0, 5)
         df_copy['VI_minus'] = (df_copy['VM_minus_sum'] / df_copy['TR_sum']).clip(0, 5)
 
         # 计算Vortex指标差值，用于评估趋势强度
         df_copy['VI_diff'] = df_copy['VI_plus'] - df_copy['VI_minus']
 
-        # 记录交叉信号，确保值为0或1
-        df_copy['Vortex_Cross_Up'] = (
-                (df_copy['VI_plus'] > df_copy['VI_minus']) &
-                (df_copy['VI_plus'].shift(1) <= df_copy['VI_minus'].shift(1))
-        ).astype(int)
+        # 记录交叉信号
+        df_copy['Vortex_Cross_Up'] = ((df_copy['VI_plus'] > df_copy['VI_minus']) &
+                                      (df_copy['VI_plus'].shift(1) <= df_copy['VI_minus'].shift(1))).astype(int)
 
-        df_copy['Vortex_Cross_Down'] = (
-                (df_copy['VI_plus'] < df_copy['VI_minus']) &
-                (df_copy['VI_plus'].shift(1) >= df_copy['VI_minus'].shift(1))
-        ).astype(int)
+        df_copy['Vortex_Cross_Down'] = ((df_copy['VI_plus'] < df_copy['VI_minus']) &
+                                        (df_copy['VI_plus'].shift(1) >= df_copy['VI_minus'].shift(1))).astype(int)
 
         # 填充NaN值
         for col in ['VI_plus', 'VI_minus', 'VI_diff', 'Vortex_Cross_Up', 'Vortex_Cross_Down']:
-            if col in df_copy.columns:
-                df_copy[col] = df_copy[col].fillna(0)
+            df_copy[col] = df_copy[col].fillna(0)
 
         # 获取最新值并打印
         latest_vi_plus = df_copy['VI_plus'].iloc[-1]
@@ -1009,13 +1022,18 @@ def calculate_vortex_indicator(df: pd.DataFrame, period: int = 14) -> pd.DataFra
         for col in ['VI_plus', 'VI_minus', 'VI_diff', 'Vortex_Cross_Up', 'Vortex_Cross_Down']:
             df[col] = df_copy[col]
 
-        # 清理中间计算列
-        if 'TR' not in df.columns:  # 如果TR之前不存在，则删除
-            df = df.drop(['TR'], axis=1)
+        # 打印诊断信息，帮助跟踪计算过程
+        print_colored(f"Vortex计算诊断 - VM+总和:{df_copy['VM_plus_sum'].iloc[-1]:.4f}, "
+                      f"VM-总和:{df_copy['VM_minus_sum'].iloc[-1]:.4f}, "
+                      f"TR总和:{df_copy['TR_sum'].iloc[-1]:.4f}",
+                      Colors.INFO)
 
         return df
     except Exception as e:
         print_colored(f"❌ 计算Vortex指标失败: {e}", Colors.ERROR)
+        # 打印详细错误信息，帮助调试
+        import traceback
+        print_colored(f"详细错误: {traceback.format_exc()}", Colors.ERROR)
         # 确保返回原始DataFrame，不影响后续计算
         return df
 
@@ -1168,7 +1186,7 @@ def calculate_fibonacci_retracements(df: pd.DataFrame):
 
 def calculate_optimized_indicators(df: pd.DataFrame, btc_df=None):
     """
-    计算优化后的指标，允许部分指标因数据不足而跳过，但关键指标缺失时返回空DataFrame
+    计算优化后的指标，修复Vortex指标计算问题
     增强版：优化超级趋势计算和提供更多日志信息
 
     参数:
@@ -1287,12 +1305,6 @@ def calculate_optimized_indicators(df: pd.DataFrame, btc_df=None):
         else:
             print_colored(f"⚠️ 数据不足（{len(df)}根K线），无法计算Williams %R（需要14根K线）", Colors.WARNING)
 
-        # 计算Vortex指标
-        if len(df) >= 14:
-            df = calculate_vortex_indicator(df, period=14)
-        else:
-            print_colored(f"⚠️ 数据不足（{len(df)}根K线），无法计算Vortex指标（需要14根K线）", Colors.WARNING)
-
         # 计算OBV
         df['OBV'] = (np.sign(df['close'].diff()) * df['volume']).fillna(0).cumsum()
         log_indicator(None, "OBV", df['OBV'].iloc[-1])
@@ -1306,6 +1318,27 @@ def calculate_optimized_indicators(df: pd.DataFrame, btc_df=None):
             log_indicator(None, "ATR", df['ATR'].iloc[-1])
         else:
             print_colored(f"⚠️ 数据不足（{len(df)}根K线），无法计算ATR（需要14根K线）", Colors.WARNING)
+
+        # 计算Vortex指标 - 修复版本，确保在ATR计算之后
+        if len(df) >= 14 and 'ATR' in df.columns:
+            print_colored("开始计算Vortex指标...", Colors.INFO)
+            df = calculate_vortex_indicator(df, period=14)
+
+            # 检查Vortex指标是否计算成功
+            if all(x in df.columns for x in ['VI_plus', 'VI_minus']):
+                vi_plus_val = df['VI_plus'].iloc[-1]
+                vi_minus_val = df['VI_minus'].iloc[-1]
+                if vi_plus_val == 0 and vi_minus_val == 0:
+                    print_colored("⚠️ Vortex指标计算结果异常（全为0），尝试重新计算", Colors.WARNING)
+                    # 仅用于诊断，输出部分关键数据
+                    print_colored(f"诊断信息 - 高价范围: {df['high'].min():.4f}-{df['high'].max():.4f}, "
+                                  f"低价范围: {df['low'].min():.4f}-{df['low'].max():.4f}, "
+                                  f"ATR: {df['ATR'].iloc[-1]:.4f}",
+                                  Colors.INFO)
+            else:
+                print_colored("⚠️ Vortex指标列未正确创建", Colors.WARNING)
+        else:
+            print_colored(f"⚠️ 数据不足或缺失ATR，无法计算Vortex指标", Colors.WARNING)
 
         # 计算动量
         if len(df) >= 10:
@@ -1367,14 +1400,18 @@ def calculate_optimized_indicators(df: pd.DataFrame, btc_df=None):
             df['Plus_DM'] = (df['high'] - df['high'].shift(1)).clip(lower=0)
             df['Minus_DM'] = (df['low'].shift(1) - df['low']).clip(lower=0)
             df['TR14'] = df['TR'].rolling(window=14, min_periods=1).sum()
-            df['Plus_DI'] = 100 * (df['Plus_DM'].rolling(window=14, min_periods=1).sum() / df['TR14'].replace(0,
-                                                                                                              np.finfo(
-                                                                                                                  float).eps))
-            df['Minus_DI'] = 100 * (df['Minus_DM'].rolling(window=14, min_periods=1).sum() / df['TR14'].replace(0,
-                                                                                                                np.finfo(
-                                                                                                                    float).eps))
-            df['DX'] = 100 * abs(df['Plus_DI'] - df['Minus_DI']) / (df['Plus_DI'] + df['Minus_DI']).replace(0, np.finfo(
-                float).eps)
+
+            # 确保不除以零
+            tr14_nonzero = df['TR14'].replace(0, np.finfo(float).eps)
+
+            df['Plus_DI'] = 100 * (df['Plus_DM'].rolling(window=14, min_periods=1).sum() / tr14_nonzero)
+            df['Minus_DI'] = 100 * (df['Minus_DM'].rolling(window=14, min_periods=1).sum() / tr14_nonzero)
+
+            # 计算DX时避免除以零
+            di_sum = df['Plus_DI'] + df['Minus_DI']
+            di_sum_nonzero = di_sum.replace(0, np.finfo(float).eps)
+
+            df['DX'] = 100 * abs(df['Plus_DI'] - df['Minus_DI']) / di_sum_nonzero
             df['ADX'] = df['DX'].rolling(window=14, min_periods=1).mean()
 
             adx_value = df['ADX'].iloc[-1]
@@ -1401,7 +1438,10 @@ def calculate_optimized_indicators(df: pd.DataFrame, btc_df=None):
             typical_price = (df['high'] + df['low'] + df['close']) / 3
             sma_tp = typical_price.rolling(window=20, min_periods=1).mean()
             mean_dev = (typical_price - sma_tp).abs().rolling(window=20, min_periods=1).mean()
-            df['CCI'] = (typical_price - sma_tp) / (0.015 * mean_dev.replace(0, np.finfo(float).eps))
+            # 确保不除以零
+            mean_dev_nonzero = mean_dev.replace(0, np.finfo(float).eps)
+
+            df['CCI'] = (typical_price - sma_tp) / (0.015 * mean_dev_nonzero)
 
             cci_value = df['CCI'].iloc[-1]
             cci_color = Colors.RED if cci_value > 100 else Colors.GREEN if cci_value < -100 else Colors.RESET
@@ -1558,7 +1598,6 @@ def calculate_optimized_indicators(df: pd.DataFrame, btc_df=None):
         print_colored(f"❌ 计算优化指标失败: {e}", Colors.ERROR)
         indicators_logger.error(f"计算优化指标失败: {e}")
         return pd.DataFrame()
-
 
 def wait_for_entry_timing(self, symbol, score, amount):
         """

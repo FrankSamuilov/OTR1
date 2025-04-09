@@ -34,7 +34,6 @@ from integration_module import (
 )
 
 
-
 # 在文件开头导入所需的模块后，添加这个类定义
 class EnhancedTradingBot:
     def __init__(self, api_key: str, api_secret: str, config: dict):
@@ -83,6 +82,87 @@ class EnhancedTradingBot:
 
         print(f"初始化完成，交易对: {self.config['TRADE_PAIRS']}")
 
+    def active_position_monitor(self, check_interval=15):
+        """
+        主动监控持仓，确保及时执行止盈止损
+
+        参数:
+            check_interval: 检查间隔（秒）
+        """
+        print(f"🔄 启动主动持仓监控（每{check_interval}秒检查一次）")
+
+        try:
+            while True:
+                # 如果没有持仓，等待一段时间后再检查
+                if not self.open_positions:
+                    time.sleep(check_interval)
+                    continue
+
+                # 当前持仓列表的副本，用于检查
+                positions = self.open_positions.copy()
+
+                for pos in positions:
+                    symbol = pos["symbol"]
+                    position_side = pos.get("position_side", "LONG")
+                    entry_price = pos["entry_price"]
+
+                    # 获取当前价格
+                    try:
+                        ticker = self.client.futures_symbol_ticker(symbol=symbol)
+                        current_price = float(ticker['price'])
+                    except Exception as e:
+                        continue
+
+                    # 计算利润百分比
+                    if position_side == "LONG":
+                        profit_pct = (current_price - entry_price) / entry_price
+                    else:  # SHORT
+                        profit_pct = (entry_price - current_price) / entry_price
+
+                    # 使用固定的止盈止损比例
+                    take_profit = 0.025  # 固定2.5%止盈
+                    stop_loss = -0.0175  # 固定1.75%止损
+
+                    # 检查止盈条件
+                    if profit_pct >= take_profit:
+                        print(
+                            f"🔔 主动监控: {symbol} {position_side} 达到止盈条件 ({profit_pct:.2%} >= {take_profit:.2%})")
+                        success, closed = self.close_position(symbol, position_side)
+                        if success:
+                            print(f"✅ {symbol} {position_side} 止盈平仓成功: +{profit_pct:.2%}")
+                            self.logger.info(f"{symbol} {position_side}主动监控止盈平仓", extra={
+                                "profit_pct": profit_pct,
+                                "take_profit": take_profit,
+                                "entry_price": entry_price,
+                                "exit_price": current_price
+                            })
+                        else:
+                            print(f"❌ {symbol} {position_side} 止盈平仓失败")
+
+                    # 检查止损条件
+                    elif profit_pct <= stop_loss:
+                        print(
+                            f"🔔 主动监控: {symbol} {position_side} 达到止损条件 ({profit_pct:.2%} <= {stop_loss:.2%})")
+                        success, closed = self.close_position(symbol, position_side)
+                        if success:
+                            print(f"✅ {symbol} {position_side} 止损平仓成功: {profit_pct:.2%}")
+                            self.logger.info(f"{symbol} {position_side}主动监控止损平仓", extra={
+                                "profit_pct": profit_pct,
+                                "stop_loss": stop_loss,
+                                "entry_price": entry_price,
+                                "exit_price": current_price
+                            })
+                        else:
+                            print(f"❌ {symbol} {position_side} 止损平仓失败")
+
+                # 等待下一次检查
+                time.sleep(check_interval)
+        except KeyboardInterrupt:
+            print("主动持仓监控已停止")
+        except Exception as e:
+            print(f"主动持仓监控发生错误: {e}")
+            self.logger.error(f"主动持仓监控错误", extra={"error": str(e)})
+
     def calculate_dynamic_order_amount(self, risk, account_balance):
         """基于风险和账户余额计算适当的订单金额"""
         # 基础订单百分比 - 默认账户的5%
@@ -112,9 +192,16 @@ class EnhancedTradingBot:
         return order_amount
 
     def trade(self):
-        """主交易循环 - 集成增强版多时间框架分析"""
+        """增强版多时框架集成交易循环，包含主动持仓监控"""
+        import threading
+
         print("启动增强版多时间框架集成交易机器人...")
         self.logger.info("增强版多时间框架集成交易机器人启动", extra={"version": "Enhanced-MTF-" + VERSION})
+
+        # 在单独的线程中启动主动持仓监控
+        monitor_thread = threading.Thread(target=self.active_position_monitor, args=(15,), daemon=True)
+        monitor_thread.start()
+        print("✅ 主动持仓监控已在后台启动（每15秒检查一次）")
 
         while True:
             try:
@@ -180,13 +267,23 @@ class EnhancedTradingBot:
                         if "price_prediction" in details and details["price_prediction"].get("valid", False):
                             predicted = details["price_prediction"]["predicted_price"]
                         else:
-                            predicted = self.predict_short_term_price(symbol, horizon_minutes=60)
+                            predicted = self.predict_short_term_price(symbol, horizon_minutes=90)  # 使用90分钟预测
 
                         if predicted is None:
                             predicted = current_price * (1.05 if signal == "BUY" else 0.95)  # 默认5%变动
 
+                        # 计算预期价格变动百分比
+                        expected_movement = abs(predicted - current_price) / current_price * 100
+
+                        # 如果预期变动小于2.5%，则跳过交易
+                        if expected_movement < 2.5:
+                            print_colored(
+                                f"⚠️ {symbol}的预期价格变动({expected_movement:.2f}%)小于最低要求(2.5%)，跳过交易",
+                                Colors.WARNING)
+                            continue
+
                         # 计算风险和交易金额
-                        risk = abs(current_price - predicted) / current_price
+                        risk = expected_movement / 100  # 预期变动作为风险指标
 
                         # 计算交易金额时考虑轻量级信号
                         candidate_amount = self.calculate_dynamic_order_amount(risk, account_balance)
@@ -204,7 +301,8 @@ class EnhancedTradingBot:
                             "predicted_price": predicted,
                             "risk": risk,
                             "amount": candidate_amount,
-                            "is_light": is_light
+                            "is_light": is_light,
+                            "expected_movement": expected_movement
                         }
 
                         trade_candidates.append(candidate)
@@ -212,7 +310,7 @@ class EnhancedTradingBot:
                         print_colored(
                             f"候选交易: {symbol} {signal}, "
                             f"质量评分: {quality_score:.2f}, "
-                            f"预期波动: {risk * 100:.2f}%, "
+                            f"预期波动: {expected_movement:.2f}%, "
                             f"下单金额: {candidate_amount:.2f} USDC",
                             Colors.GREEN if signal == "BUY" else Colors.RED
                         )
@@ -235,6 +333,7 @@ class EnhancedTradingBot:
                         predicted = candidate["predicted_price"]
                         amount = candidate["amount"]
                         is_light = candidate["is_light"]
+                        expected_movement = candidate["expected_movement"]
 
                         side_color = Colors.GREEN if signal == "BUY" else Colors.RED
                         position_type = "轻仓位" if is_light else "标准仓位"
@@ -242,7 +341,7 @@ class EnhancedTradingBot:
                         print(f"\n{idx}. {symbol} - {side_color}{signal}{Colors.RESET} ({position_type})")
                         print(f"   质量评分: {quality:.2f}")
                         print(f"   当前价格: {current:.6f}, 预测价格: {predicted:.6f}")
-                        print(f"   预期波动: {candidate['risk'] * 100:.2f}%")
+                        print(f"   预期波动: {expected_movement:.2f}%")
                         print(f"   下单金额: {amount:.2f} USDC")
                 else:
                     print("\n本轮无交易候选")
@@ -477,83 +576,84 @@ class EnhancedTradingBot:
             return None
 
     def generate_trade_signal(self, df, symbol):
-        """基于SMC策略和增强多时间框架协调生成交易信号"""
-        df.name = symbol  # 设置名称以便在日志中引用
+
+        df.name = symbol  # Set name for logging reference
 
         if df is None or len(df) < 20:
-            self.logger.warning(f"{symbol}数据不足，无法生成信号")
+            self.logger.warning(f"{symbol} insufficient data, cannot generate signal")
             return "HOLD", 0
 
         try:
-            # 计算指标
+            # Calculate indicators
             df = calculate_optimized_indicators(df)
             if df is None or df.empty:
-                self.logger.warning(f"{symbol}指标计算失败")
+                self.logger.warning(f"{symbol} indicator calculation failed")
                 return "HOLD", 0
 
-            # 计算质量评分
+            # Calculate quality score
             quality_score, metrics = calculate_quality_score(df, self.client, symbol, None, self.config, self.logger)
-            print_colored(f"{symbol} 初始质量评分: {quality_score:.2f}", Colors.INFO)
+            print_colored(f"{symbol} initial quality score: {quality_score:.2f}", Colors.INFO)
 
-            # 使用增强版多时间框架协调器
-            print_colored(f"🔄 对{symbol}执行增强版多时间框架分析", Colors.BLUE + Colors.BOLD)
-
-            # 检查是否有等待中的入场机会
+            # Check for pending entry opportunities
             pending_entry = self.mtf_coordinator.check_pending_entries(symbol)
             if pending_entry["should_enter"]:
                 return pending_entry["signal"], pending_entry["quality_score"]
 
-            # 获取多时间框架分析的信号
+            # Get signal from multi-timeframe coordinator
             signal, adjusted_score, details = self.mtf_coordinator.generate_signal(symbol, quality_score)
 
-            # 获取主导时间框架
-            primary_tf = details["primary_timeframe"]
-            print_colored(f"主导时间框架: {primary_tf}", Colors.INFO)
+            # Get current price and predicted price to calculate expected movement
+            current_price = None
+            try:
+                ticker = self.client.futures_symbol_ticker(symbol=symbol)
+                current_price = float(ticker['price'])
+            except Exception as e:
+                print_colored(f"Cannot get current price for {symbol}: {e}", Colors.WARNING)
+                return "HOLD", 0
 
-            # 获取一致性信息
-            coherence = details["coherence"]
-            print_colored(
-                f"时间框架一致性: {coherence['agreement_level']} "
-                f"(得分: {coherence['coherence_score']:.1f}/100)",
-                Colors.INFO
-            )
+            # Get price prediction
+            predicted_price = None
+            price_pred = details.get("price_prediction", {})
+            if price_pred and price_pred.get("valid", False):
+                predicted_price = price_pred.get("predicted_price")
+            else:
+                predicted_price = self.predict_short_term_price(symbol, horizon_minutes=60)
 
-            # 短期价格预测
-            if "price_prediction" in details and details["price_prediction"].get("valid", False):
-                price_pred = details["price_prediction"]
-                change_str = f"{price_pred['change_pct']:+.2f}%"
-                change_color = Colors.GREEN if price_pred['change_pct'] > 0 else Colors.RED
+            if predicted_price is None:
+                print_colored(f"Cannot predict price for {symbol}", Colors.WARNING)
+                return "HOLD", 0
+
+            # Calculate expected price movement percentage
+            expected_movement = abs(predicted_price - current_price) / current_price * 100
+
+            # Skip if expected movement is too small (less than 2.5%)
+            if expected_movement < 2.5:
                 print_colored(
-                    f"价格预测: {price_pred['predicted_price']:.6f} ({change_color}{change_str}{Colors.RESET})",
-                    Colors.INFO
-                )
+                    f"Expected movement ({expected_movement:.2f}%) too small for {symbol}, minimum required: 2.5%",
+                    Colors.YELLOW)
+                return "HOLD", 0
 
-            # 记录调整后的质量评分
-            print_colored(f"调整后质量评分: {adjusted_score:.2f}", Colors.INFO)
-
-            # 记录信号生成过程到日志
-            self.logger.info(f"{symbol} 信号生成", extra={
-                "original_score": quality_score,
-                "adjusted_score": adjusted_score,
-                "primary_timeframe": primary_tf,
-                "coherence_level": coherence["agreement_level"],
-                "coherence_score": coherence["coherence_score"],
-                "dominant_trend": coherence["dominant_trend"],
-                "signal": signal,
-            })
-
-            # 将NEUTRAL转为HOLD以保持兼容性
-            final_signal = "HOLD" if signal == "NEUTRAL" else signal
-            # 处理LIGHT_UP和LIGHT_DOWN信号
-            if signal == "LIGHT_UP":
+            # Make the signal decision
+            # More aggressive logic - lower the threshold for valid signals
+            if adjusted_score >= 5.5 and signal in ["BUY", "LIGHT_UP"]:
                 final_signal = "BUY"
-            elif signal == "LIGHT_DOWN":
+            elif adjusted_score <= 4.5 and signal in ["SELL", "LIGHT_DOWN"]:
                 final_signal = "SELL"
+            elif signal == "NEUTRAL":
+                final_signal = "HOLD"
+            else:
+                # Handle LIGHT signals
+                if signal == "LIGHT_UP":
+                    final_signal = "BUY"
+                elif signal == "LIGHT_DOWN":
+                    final_signal = "SELL"
+                else:
+                    final_signal = "HOLD"
 
             return final_signal, adjusted_score
 
         except Exception as e:
-            self.logger.error(f"{symbol}生成信号失败: {e}")
+            self.logger.error(f"{symbol} signal generation failed: {e}")
             return "HOLD", 0
 
     def place_hedge_orders(self, symbol, primary_side, quality_score):
@@ -637,7 +737,16 @@ class EnhancedTradingBot:
 
     def place_futures_order_usdc(self, symbol: str, side: str, amount: float, leverage: int = 5) -> bool:
         """
-        执行期货市场订单 - 修复版，解决保证金不足问题
+        执行期货市场订单 - 增强版，加入预期价格变动检查和固定止盈止损
+
+        参数:
+            symbol: 交易对符号
+            side: 交易方向 ('BUY' 或 'SELL')
+            amount: 交易金额(USDC)
+            leverage: 杠杆倍数
+
+        返回:
+            bool: 交易是否成功
         """
         import math
         import time
@@ -647,6 +756,24 @@ class EnhancedTradingBot:
             # 获取当前账户余额
             account_balance = self.get_futures_balance()
             print(f"📊 当前账户余额: {account_balance:.2f} USDC")
+
+            # 获取当前价格
+            ticker = self.client.futures_symbol_ticker(symbol=symbol)
+            current_price = float(ticker['price'])
+
+            # 预测未来价格，用于检查最小价格变动
+            predicted_price = self.predict_short_term_price(symbol, horizon_minutes=60)
+            if predicted_price is None:
+                predicted_price = current_price * (1.05 if side == "BUY" else 0.95)  # 默认5%变动
+
+            # 计算预期价格变动百分比
+            expected_movement = abs(predicted_price - current_price) / current_price * 100
+
+            # 如果预期变动小于2.5%，则跳过交易
+            if expected_movement < 2.5:
+                print_colored(f"⚠️ {symbol}的预期价格变动({expected_movement:.2f}%)小于最低要求(2.5%)", Colors.WARNING)
+                self.logger.warning(f"{symbol}预期变动不足", extra={"expected_movement": expected_movement})
+                return False
 
             # 严格限制订单金额不超过账户余额的5%
             max_allowed_amount = account_balance * 0.05
@@ -659,6 +786,7 @@ class EnhancedTradingBot:
             min_amount = self.config.get("MIN_NOTIONAL", 5)
             if amount < min_amount and account_balance >= min_amount:
                 amount = min_amount
+                print(f"⚠️ 订单金额已调整至最低限额: {min_amount} USDC")
 
             # 获取交易对信息
             info = self.client.futures_exchange_info()
@@ -685,10 +813,6 @@ class EnhancedTradingBot:
             if step_size is None:
                 print_colored(f"❌ {symbol} 无法获取交易精度信息", Colors.ERROR)
                 return False
-
-            # 获取当前价格
-            ticker = self.client.futures_symbol_ticker(symbol=symbol)
-            current_price = float(ticker['price'])
 
             # 计算数量并应用精度限制
             raw_qty = amount / current_price
@@ -723,6 +847,8 @@ class EnhancedTradingBot:
             print_colored(f"🔢 {symbol} 计划交易: 金额={amount:.2f} USDC, 数量={quantity}, 价格={current_price}",
                           Colors.INFO)
             print_colored(f"🔢 杠杆: {leverage}倍, 实际保证金: {notional / leverage:.2f} USDC", Colors.INFO)
+            print_colored(f"📈 预期价格变动: {expected_movement:.2f}%, 从 {current_price:.6f} 到 {predicted_price:.6f}",
+                          Colors.INFO)
 
             # 设置杠杆
             try:
@@ -758,11 +884,14 @@ class EnhancedTradingBot:
                     "order_id": order.get("orderId", "unknown"),
                     "quantity": quantity,
                     "notional": notional,
-                    "leverage": leverage
+                    "leverage": leverage,
+                    "expected_movement": expected_movement
                 })
 
-                # 记录持仓信息
-                self.record_open_position(symbol, side, current_price, quantity)
+                # 记录持仓信息 - 使用固定止盈止损比例
+                self.record_open_position(symbol, side, current_price, quantity,
+                                          take_profit=0.025,  # 固定2.5%止盈
+                                          stop_loss=-0.0175)  # 固定1.75%止损
                 return True
 
             except Exception as e:
@@ -788,8 +917,17 @@ class EnhancedTradingBot:
             self.logger.error(f"{symbol} 交易错误", extra={"error": str(e)})
             return False
 
-    def record_open_position(self, symbol, side, entry_price, quantity):
-        """记录新开的持仓"""
+    def record_open_position(self, symbol, side, entry_price, quantity, take_profit=0.025, stop_loss=-0.0175):
+        """记录新开的持仓，使用固定的止盈止损比例
+
+        参数:
+            symbol: 交易对符号
+            side: 交易方向 ('BUY' 或 'SELL')
+            entry_price: 入场价格
+            quantity: 交易数量
+            take_profit: 止盈百分比，默认2.5%
+            stop_loss: 止损百分比，默认-1.75%
+        """
         position_side = "LONG" if side.upper() == "BUY" else "SHORT"
 
         # 检查是否已有同方向持仓
@@ -802,13 +940,19 @@ class EnhancedTradingBot:
                 self.open_positions[i]["quantity"] = total_qty
                 self.open_positions[i]["last_update_time"] = time.time()
 
+                # 使用固定的止盈止损比例
+                self.open_positions[i]["dynamic_take_profit"] = take_profit  # 固定2.5%止盈
+                self.open_positions[i]["stop_loss"] = stop_loss  # 固定1.75%止损
+
                 self.logger.info(f"更新{symbol} {position_side}持仓", extra={
                     "new_entry_price": new_entry,
-                    "total_quantity": total_qty
+                    "total_quantity": total_qty,
+                    "take_profit": take_profit,
+                    "stop_loss": stop_loss
                 })
                 return
 
-        # 添加新持仓
+        # 添加新持仓，使用固定的止盈止损比例
         new_pos = {
             "symbol": symbol,
             "side": side,
@@ -818,13 +962,22 @@ class EnhancedTradingBot:
             "open_time": time.time(),
             "last_update_time": time.time(),
             "max_profit": 0.0,
-            "dynamic_take_profit": 0.06,  # 默认6%止盈
-            "stop_loss": -0.03,  # 默认3%止损
+            "dynamic_take_profit": take_profit,  # 固定2.5%止盈
+            "stop_loss": stop_loss,  # 固定1.75%止损
             "position_id": f"{symbol}_{position_side}_{int(time.time())}"
         }
 
         self.open_positions.append(new_pos)
-        self.logger.info(f"新增{symbol} {position_side}持仓", extra=new_pos)
+        self.logger.info(f"新增{symbol} {position_side}持仓", extra={
+            **new_pos,
+            "take_profit": take_profit,
+            "stop_loss": stop_loss
+        })
+
+        print_colored(
+            f"📝 新增{symbol} {position_side}持仓，止盈: {take_profit * 100:.2f}%，止损: {abs(stop_loss) * 100:.2f}%",
+            Colors.GREEN + Colors.BOLD)
+
 
     def close_position(self, symbol, position_side=None):
         """
@@ -1007,9 +1160,8 @@ class EnhancedTradingBot:
             self.logger.error(f"{symbol} 平仓过程发生错误", extra={"error": str(e)})
             return False, []
 
-
     def manage_open_positions(self):
-        """管理现有持仓，包括止盈止损 - 修复版"""
+        """管理现有持仓，确保使用固定的止盈止损比例"""
         self.load_existing_positions()
 
         if not self.open_positions:
@@ -1019,39 +1171,19 @@ class EnhancedTradingBot:
         current_time = time.time()
         account_balance = self.get_futures_balance()
 
-        # 更新持仓状态并获取动作建议
-        updated_positions, actions = adjust_position_for_market_change(self.open_positions, self.client, self.logger)
+        # 更新持仓状态 - 固定止盈止损比例
+        updated_positions = []
+
+        for pos in self.open_positions:
+            # 为所有持仓应用固定的止盈止损比例
+            pos["dynamic_take_profit"] = 0.025  # 固定2.5%止盈
+            pos["stop_loss"] = -0.0175  # 固定1.75%止损
+            updated_positions.append(pos)
+
         self.open_positions = updated_positions
 
-        # 执行止盈止损动作
-        for action in actions:
-            symbol = action["symbol"]
-            side = action["side"]
-            position_side = "LONG" if side == "BUY" else "SHORT"
-            action_type = action["action"]
-            profit_pct = action["profit_pct"]
-
-            if action_type == "take_profit":
-                self.logger.info(f"{symbol} {position_side}达到止盈条件, 利润: {profit_pct:.2%}")
-                success, closed = self.close_position(symbol, position_side)
-                if success:
-                    print(f"✅ {symbol} {position_side} 止盈平仓成功!")
-                else:
-                    print(f"❌ {symbol} {position_side} 止盈平仓失败")
-            elif action_type == "stop_loss":
-                self.logger.info(f"{symbol} {position_side}达到止损条件, 亏损: {profit_pct:.2%}")
-                success, closed = self.close_position(symbol, position_side)
-                if success:
-                    print(f"✅ {symbol} {position_side} 止损平仓成功!")
-                else:
-                    print(f"❌ {symbol} {position_side} 止损平仓失败")
-            elif action_type == "time_stop":
-                self.logger.info(f"{symbol} {position_side}持仓时间过长, 执行时间止损")
-                success, closed = self.close_position(symbol, position_side)
-                if success:
-                    print(f"✅ {symbol} {position_side} 时间止损平仓成功!")
-                else:
-                    print(f"❌ {symbol} {position_side} 时间止损平仓失败")
+        # 检查每个持仓的止盈止损条件
+        positions_to_remove = []  # 记录需要移除的持仓
 
         for pos in self.open_positions:
             symbol = pos["symbol"]
@@ -1075,9 +1207,9 @@ class EnhancedTradingBot:
             else:
                 profit_pct = (entry_price - current_price) / entry_price
 
-            # 获取止盈止损设置
-            take_profit = pos.get("dynamic_take_profit", 0.06)
-            stop_loss = pos.get("stop_loss", -0.03)
+            # 获取固定的止盈止损比例
+            take_profit = pos.get("dynamic_take_profit", 0.025)  # 2.5%
+            stop_loss = pos.get("stop_loss", -0.0175)  # -1.75%
 
             profit_color = Colors.GREEN if profit_pct >= 0 else Colors.RED
             print(
@@ -1085,122 +1217,64 @@ class EnhancedTradingBot:
                 f"止盈线 {take_profit:.2%}, 止损线 {stop_loss:.2%}"
             )
 
-            # 检查是否应该触发止盈止损，但尚未被自动触发
+            # 检查是否达到止盈条件
             if profit_pct >= take_profit:
-                print(f"⚠️ {symbol} {position_side} 已达止盈条件，正在手动平仓...")
+                print(f"🔔 {symbol} {position_side} 达到止盈条件 ({profit_pct:.2%} >= {take_profit:.2%})，执行平仓...")
                 success, closed = self.close_position(symbol, position_side)
                 if success:
-                    print(f"✅ {symbol} {position_side} 手动止盈平仓成功!")
+                    print(f"✅ {symbol} {position_side} 止盈平仓成功!")
+                    positions_to_remove.append(pos)
+                    self.logger.info(f"{symbol} {position_side}止盈平仓", extra={
+                        "profit_pct": profit_pct,
+                        "take_profit": take_profit,
+                        "entry_price": entry_price,
+                        "exit_price": current_price
+                    })
                 else:
-                    print(f"❌ {symbol} {position_side} 手动止盈平仓失败")
+                    print(f"❌ {symbol} {position_side} 止盈平仓失败")
+
+            # 检查是否达到止损条件
             elif profit_pct <= stop_loss:
-                print(f"⚠️ {symbol} {position_side} 已达止损条件，正在手动平仓...")
+                print(f"🔔 {symbol} {position_side} 达到止损条件 ({profit_pct:.2%} <= {stop_loss:.2%})，执行平仓...")
                 success, closed = self.close_position(symbol, position_side)
                 if success:
-                    print(f"✅ {symbol} {position_side} 手动止损平仓成功!")
+                    print(f"✅ {symbol} {position_side} 止损平仓成功!")
+                    positions_to_remove.append(pos)
+                    self.logger.info(f"{symbol} {position_side}止损平仓", extra={
+                        "profit_pct": profit_pct,
+                        "stop_loss": stop_loss,
+                        "entry_price": entry_price,
+                        "exit_price": current_price
+                    })
                 else:
-                    print(f"❌ {symbol} {position_side} 手动止损平仓失败")
+                    print(f"❌ {symbol} {position_side} 止损平仓失败")
+
             # 检查持仓时间是否过长 (超过24小时)
-            elif holding_time > 24 and profit_pct < 0:
-                print(f"⚠️ {symbol} {position_side} 持仓时间过长且处于亏损状态，正在手动平仓...")
+            elif holding_time > 24:
+                print(f"🔔 {symbol} {position_side} 持仓时间过长 ({holding_time:.2f}小时 > 24小时)，执行平仓...")
                 success, closed = self.close_position(symbol, position_side)
                 if success:
-                    print(f"✅ {symbol} {position_side} 手动时间止损平仓成功!")
+                    print(f"✅ {symbol} {position_side} 时间止损平仓成功!")
+                    positions_to_remove.append(pos)
+                    self.logger.info(f"{symbol} {position_side}时间止损平仓", extra={
+                        "holding_time": holding_time,
+                        "profit_pct": profit_pct,
+                        "entry_price": entry_price,
+                        "exit_price": current_price
+                    })
                 else:
-                    print(f"❌ {symbol} {position_side} 手动时间止损平仓失败")
+                    print(f"❌ {symbol} {position_side} 时间止损平仓失败")
+
+        # 从持仓列表中移除已平仓的持仓
+        for pos in positions_to_remove:
+            if pos in self.open_positions:
+                self.open_positions.remove(pos)
 
         # 重新加载持仓以确保数据最新
         self.load_existing_positions()
 
-        # 检查是否需要加仓
-        self.check_add_position(account_balance)
-
         # 显示持仓状态
         self.display_positions_status()
-
-    def check_add_position(self, account_balance):
-        """检查是否有加仓机会"""
-        if not self.open_positions:
-            return
-
-        # 为每个持仓检查加仓机会
-        for pos in self.open_positions:
-            symbol = pos["symbol"]
-            side = pos["side"]
-            position_side = pos["position_side"]
-            entry_price = pos["entry_price"]
-
-            # 获取当前价格
-            try:
-                ticker = self.client.futures_symbol_ticker(symbol=symbol)
-                current_price = float(ticker['price'])
-            except Exception as e:
-                self.logger.warning(f"获取{symbol}价格失败: {e}")
-                continue
-
-            # 计算当前利润率
-            if position_side == "LONG":
-                profit_pct = (current_price - entry_price) / entry_price
-            else:  # SHORT
-                profit_pct = (entry_price - current_price) / entry_price
-
-            # 获取最新数据和质量评分
-            df = self.get_historical_data_with_cache(symbol, force_refresh=True)
-            if df is None:
-                continue
-
-            df = calculate_optimized_indicators(df)
-            quality_score, metrics = calculate_quality_score(df, self.client, symbol, None, self.config, self.logger)
-
-            # 检查质量评分历史
-            score_increasing = False
-            if symbol in self.quality_score_history and len(self.quality_score_history[symbol]) >= 3:
-                recent_scores = [item["score"] for item in self.quality_score_history[symbol][-3:]]
-                score_increasing = all(recent_scores[i] < recent_scores[i + 1] for i in range(len(recent_scores) - 1))
-
-            # 决定是否加仓
-            should_add = False
-            add_reason = ""
-
-            if quality_score >= 9.0:
-                # 高质量评分自动加仓
-                should_add = True
-                add_reason = "极高质量评分"
-            elif score_increasing and quality_score >= 7.0:
-                # 评分持续上升且较高
-                should_add = True
-                add_reason = "质量评分持续上升"
-            elif profit_pct >= 0.05 and quality_score >= 6.0:
-                # 已有盈利，评分尚可
-                should_add = True
-                add_reason = "已有盈利且评分良好"
-
-            # 执行加仓
-            if should_add:
-                # 计算加仓金额(账户的2%)
-                add_amount = account_balance * 0.02
-
-                # 检查同一货币总敞口限制
-                total_exposure, symbol_exposures = get_total_position_exposure(self.open_positions, account_balance)
-                symbol_exposure = symbol_exposures.get(symbol, 0)
-
-                if symbol_exposure >= 15:
-                    self.logger.info(f"{symbol}已达到最大敞口限制，跳过加仓")
-                    continue
-
-                self.logger.info(f"{symbol} {position_side}准备加仓", extra={
-                    "reason": add_reason,
-                    "quality_score": quality_score,
-                    "profit_pct": profit_pct,
-                    "add_amount": add_amount
-                })
-
-                # 执行加仓
-                success = self.place_futures_order_usdc(symbol, side, add_amount)
-                if success:
-                    self.logger.info(f"{symbol} {position_side}加仓成功")
-                else:
-                    self.logger.warning(f"{symbol} {position_side}加仓失败")
 
     def display_positions_status(self):
         """显示所有持仓的状态"""
@@ -1332,6 +1406,7 @@ class EnhancedTradingBot:
             print(f"{symbol:<10} {score:<6.2f} {trend:<8} {backtest:<8} {similarity_pct:<12.1f}%")
 
         print("-" * 50)
+
 
 if __name__ == "__main__":
     API_KEY = "lnfs30CvqF8cCIdRcIfW6kKnGGpLoRzTUrwdRslTX4e7a0O6OJ3SYsUT6gF1B26W"
