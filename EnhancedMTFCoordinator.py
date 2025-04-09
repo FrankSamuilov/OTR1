@@ -211,17 +211,8 @@ class EnhancedMTFCoordinator:
             return minutes
 
     def predict_price_movement(self, symbol: str, timeframe_data: Dict[str, pd.DataFrame],
-                               horizon_minutes: int = 60) -> Dict[str, Any]:
-        """基于多时间框架分析进行价格运动预测
-
-        参数:
-            symbol: 交易对
-            timeframe_data: 各时间框架的DataFrame字典
-            horizon_minutes: 预测时间范围（分钟）
-
-        返回:
-            价格预测结果
-        """
+                               horizon_minutes: int = 90) -> Dict[str, Any]:
+        """基于多时间框架分析进行价格运动预测，预测时间为90分钟"""
         # 检查缓存
         cache_key = f"{symbol}_{horizon_minutes}"
         current_time = time.time()
@@ -314,6 +305,18 @@ class EnhancedMTFCoordinator:
         weighted_prediction = sum(p["prediction"] * p["weight"] for p in predictions.values()) / total_weight
         weighted_change_pct = (weighted_prediction - current_price) / current_price * 100
 
+        # 确保方向预测更明确 - 避免微小变动
+        if 0 < abs(weighted_change_pct) < 0.5:
+            # 对于非常小的预测变动，增强方向
+            direction_sign = 1 if weighted_change_pct > 0 else -1
+            weighted_change_pct = direction_sign * max(0.5, abs(weighted_change_pct))
+            weighted_prediction = current_price * (1 + weighted_change_pct / 100)
+
+            print_colored(
+                f"增强微小变动方向性: {weighted_change_pct:+.2f}%",
+                Colors.YELLOW
+            )
+
         # 计算短期与中长期预测方向
         short_term_predictions = {k: v for k, v in predictions.items() if k in ["1m", "5m", "15m", "30m"]}
         long_term_predictions = {k: v for k, v in predictions.items() if k in ["1h", "4h"]}
@@ -383,7 +386,8 @@ class EnhancedMTFCoordinator:
             "short_term_direction": short_term_direction,
             "long_term_direction": long_term_direction,
             "timeframe_predictions": predictions,
-            "conflict": short_term_direction != long_term_direction if short_term_direction and long_term_direction else False
+            "conflict": short_term_direction != long_term_direction if short_term_direction and long_term_direction else False,
+            "time_horizon": horizon_minutes  # 添加时间范围到结果中
         }
 
         # 缓存结果
@@ -395,15 +399,7 @@ class EnhancedMTFCoordinator:
         return result
 
     def calculate_timeframe_coherence(self, symbol: str, trend_analysis: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
-        """计算时间框架一致性 - 专注于短期交易目标
-
-        参数:
-            symbol: 交易对
-            trend_analysis: 趋势分析结果
-
-        返回:
-            一致性分析结果
-        """
+        """计算时间框架一致性 - 降低一致性要求"""
         # 初始化结果
         result = {
             "coherence_score": 0.0,
@@ -519,8 +515,18 @@ class EnhancedMTFCoordinator:
             else:
                 agreement_level = "不一致"
 
-            # 专注于短期交易的建议
-            # 检查短期与长期趋势是否一致
+            # 降低阈值，更容易产生信号
+            if short_term_trend == "UP" and short_term_confidence >= 0.5:  # 原为0.7
+                recommendation = "BUY"
+            elif short_term_trend == "DOWN" and short_term_confidence >= 0.5:  # 原为0.7
+                recommendation = "SELL"
+            elif short_term_trend != "NEUTRAL" and short_term_confidence >= 0.3:  # 原为0.5
+                # 中等置信度的短期信号
+                recommendation = f"LIGHT_{short_term_trend}"  # LIGHT_UP or LIGHT_DOWN
+            else:
+                recommendation = "NEUTRAL"
+
+            # 当短期与长期趋势冲突时，降低建议强度
             long_term_total = sum(long_term_weights.values())
             long_term_trend = "NEUTRAL"
             if long_term_total > 0:
@@ -529,25 +535,6 @@ class EnhancedMTFCoordinator:
                 # 如果长期趋势是NEUTRAL，选择次高的趋势
                 if long_term_trend == "NEUTRAL" and (long_term_weights["UP"] > 0 or long_term_weights["DOWN"] > 0):
                     long_term_trend = "UP" if long_term_weights["UP"] > long_term_weights["DOWN"] else "DOWN"
-
-            # 生成交易建议 - 优先考虑短期趋势
-            if short_term_trend == "UP" and short_term_confidence >= 0.7:
-                recommendation = "BUY"
-            elif short_term_trend == "DOWN" and short_term_confidence >= 0.7:
-                recommendation = "SELL"
-            elif short_term_trend != "NEUTRAL" and short_term_confidence >= 0.5:
-                # 中等置信度的短期信号
-                recommendation = f"LIGHT_{short_term_trend}"  # LIGHT_UP or LIGHT_DOWN
-            else:
-                recommendation = "NEUTRAL"
-
-            # 当短期与长期趋势冲突时，降低建议强度
-            if short_term_trend != "NEUTRAL" and long_term_trend != "NEUTRAL" and short_term_trend != long_term_trend:
-                # 冲突情况下保持短期方向，但降级为轻仓位
-                if recommendation == "BUY":
-                    recommendation = "LIGHT_UP"
-                elif recommendation == "SELL":
-                    recommendation = "LIGHT_DOWN"
 
             # 更新结果
             result.update({
@@ -665,15 +652,7 @@ class EnhancedMTFCoordinator:
         return coherence_result
 
     def generate_signal(self, symbol: str, quality_score: float) -> Tuple[str, float, Dict[str, Any]]:
-        """基于多时间框架分析和价格预测生成一致性交易信号
-
-        参数:
-            symbol: 交易对
-            quality_score: 初步质量评分
-
-        返回:
-            (信号, 调整后的质量评分, 详细信息)
-        """
+        """基于多时间框架分析和价格预测生成更积极的交易信号"""
         # 获取时间框架数据
         timeframe_data = self.fetch_all_timeframes(symbol, force_refresh=True)
 
@@ -683,8 +662,8 @@ class EnhancedMTFCoordinator:
         # 计算一致性
         coherence = self.calculate_timeframe_coherence(symbol, trend_analysis)
 
-        # 短期价格预测 - 60分钟内
-        price_pred = self.predict_price_movement(symbol, timeframe_data, 60)
+        # 短期价格预测 - 90分钟内
+        price_pred = self.predict_price_movement(symbol, timeframe_data, 90)
 
         # 计算支撑阻力位
         support_resistance = self._calculate_support_resistance(symbol, timeframe_data)
@@ -692,102 +671,54 @@ class EnhancedMTFCoordinator:
         # 调整质量评分
         adjusted_score, adjustment_info = self.adjust_quality_score(symbol, quality_score, coherence, price_pred)
 
-        # 生成交易信号 - 确保预测与信号方向一致
+        # 生成交易信号 - 更积极的规则
         signal = "NEUTRAL"
         final_info = {}
 
+        # 更积极的信号生成逻辑
         if price_pred.get("valid", False):
-            # 获取价格预测方向
+            # 获取价格预测方向和信心度
             pred_direction = price_pred.get("direction")
             pred_confidence = price_pred.get("confidence", 0)
 
-            # 获取建议信号
-            suggested_signal = coherence.get("recommendation", "NEUTRAL")
+            # 仅基于短期时间框架的趋势
+            short_term_bias = coherence.get("short_term_bias", "NEUTRAL")
 
-            # 检查预测方向与信号方向是否一致
-            if pred_direction == "UP" and "BUY" in suggested_signal:
-                # 上涨预测，买入信号
-                signal = suggested_signal
+            # 降低产生BUY/SELL信号的门槛
+            # 1. 如果预测方向明确，即使信心度较低也产生信号
+            if pred_direction == "UP" and pred_confidence > 0.4:  # 降低信心度要求
+                signal = "BUY"
+            elif pred_direction == "DOWN" and pred_confidence > 0.4:  # 降低信心度要求
+                signal = "SELL"
 
-                # 如果预测置信度高，可以提升信号强度
-                if pred_confidence > 0.8 and signal.startswith("LIGHT_"):
-                    signal = "BUY"  # 提升为全仓位信号
+            # 2. 或者如果短期偏向明确，也产生信号
+            elif short_term_bias == "UP" and coherence.get("short_term_confidence", 0) > 0.3:  # 降低短期信心度要求
+                signal = "BUY"
+            elif short_term_bias == "DOWN" and coherence.get("short_term_confidence", 0) > 0.3:  # 降低短期信心度要求
+                signal = "SELL"
 
-            elif pred_direction == "DOWN" and "SELL" in suggested_signal:
-                # 下跌预测，卖出信号
-                signal = suggested_signal
-
-                # 如果预测置信度高，可以提升信号强度
-                if pred_confidence > 0.8 and signal.startswith("LIGHT_"):
-                    signal = "SELL"  # 提升为全仓位信号
-
-            elif pred_direction and suggested_signal != "NEUTRAL":
-                # 方向不一致，但有明确信号和预测
-                if pred_confidence > 0.8:
-                    # 如果预测置信度高，优先考虑预测方向
-                    signal = "BUY" if pred_direction == "UP" else "SELL"
-                    signal = "LIGHT_" + signal.replace("LIGHT_", "")  # 降级为轻仓位
-
-                    print_colored(
-                        f"⚠️ 预测方向({pred_direction})与建议信号({suggested_signal})不一致，"
-                        f"但预测置信度高({pred_confidence:.2f})，采用预测方向",
-                        Colors.WARNING
-                    )
-                else:
-                    # 置信度不高，等待入场
-                    signal = "NEUTRAL"
-                    print_colored(
-                        f"⚠️ 预测方向({pred_direction})与建议信号({suggested_signal})不一致，"
-                        f"且预测置信度不高({pred_confidence:.2f})，保持观望",
-                        Colors.WARNING
-                    )
-            else:
-                # 没有明确方向，保持中性
-                signal = "NEUTRAL"
-                print_colored(f"没有明确方向，保持观望", Colors.YELLOW)
+            # 3. 或者使用建议信号(如果不是NEUTRAL)
+            elif coherence.get("recommendation", "NEUTRAL") != "NEUTRAL":
+                signal = coherence.get("recommendation", "NEUTRAL")
         else:
-            # 无效预测，使用趋势一致性建议
+            # 没有有效预测，使用一致性建议
             signal = coherence.get("recommendation", "NEUTRAL")
 
-        # 当信号与预测方向不一致时，并且有明确方向时，转为LIGHT或NEUTRAL
-        if price_pred.get("valid", False) and coherence.get("recommendation", "NEUTRAL") != "NEUTRAL":
-            rec_direction = "UP" if "BUY" in coherence["recommendation"] else "DOWN" if "SELL" in coherence[
-                "recommendation"] else None
-            pred_direction = price_pred.get("direction")
+        # 最后，更积极的质量评分判断
+        if adjusted_score > 4.8 and signal == "NEUTRAL":  # 降低分数要求
+            signal = "BUY"  # 默认偏向买入
+        elif adjusted_score < 4.2 and signal == "NEUTRAL":  # 降低分数要求
+            signal = "SELL"
 
-            if rec_direction and pred_direction and rec_direction != pred_direction:
-                # 信号与预测方向不一致
-                if not signal.startswith("LIGHT_") and signal != "NEUTRAL":
-                    print_colored(
-                        f"⚠️ 降级信号强度: 趋势方向({rec_direction})与预测方向({pred_direction})不一致",
-                        Colors.WARNING
-                    )
-                    if signal == "BUY":
-                        signal = "LIGHT_UP"
-                    elif signal == "SELL":
-                        signal = "LIGHT_DOWN"
-
-        # 探测入场机会 - 如果有更好的入场时机，建议等待
-        entry_opportunity = self._detect_entry_opportunity(symbol, signal, timeframe_data, support_resistance,
-                                                           price_pred)
-        if entry_opportunity["recommendation"] == "WAIT" and signal != "NEUTRAL":
-            # 有更好的入场时机
-            prev_signal = signal
-            signal = "NEUTRAL"  # 暂时不交易
-
-            print_colored(
-                f"⏳ 建议等待更好的入场点: {entry_opportunity['reason']}",
-                Colors.YELLOW
-            )
-
-            # 记录入场机会
-            self.entry_opportunities[symbol] = {
-                "original_signal": prev_signal,
-                "target_price": entry_opportunity.get("target_price"),
-                "expiry_time": time.time() + 3600,  # 1小时过期
-                "quality_score": adjusted_score,
-                "reason": entry_opportunity['reason']
-            }
+        # 确保"LIGHT_"前缀正确处理
+        if "LIGHT_" in signal:
+            # 保持LIGHT前缀不变
+            pass
+        elif signal != "NEUTRAL":
+            # 判断是否应该是全仓位信号
+            if (signal == "BUY" and adjusted_score < 6.0) or (signal == "SELL" and adjusted_score > 4.0):
+                # 转为轻仓位信号
+                signal = f"LIGHT_{signal}"
 
         # 构建详细信息
         final_info = {
@@ -795,8 +726,7 @@ class EnhancedMTFCoordinator:
             "price_prediction": price_pred,
             "support_resistance": support_resistance,
             "adjustment_info": adjustment_info,
-            "primary_timeframe": coherence.get("dominant_timeframe", "15m"),
-            "entry_opportunity": entry_opportunity
+            "primary_timeframe": coherence.get("dominant_timeframe", "15m")
         }
 
         # 打印结果
@@ -830,136 +760,6 @@ class EnhancedMTFCoordinator:
             )
 
         return signal, adjusted_score, final_info
-
-    def adjust_quality_score(self, symbol: str, original_score: float,
-                             coherence: Dict[str, Any], price_pred: Dict[str, Any]) -> Tuple[float, Dict[str, Any]]:
-        """根据时间框架一致性和价格预测调整质量评分
-
-        参数:
-            symbol: 交易对
-            original_score: 原始质量评分
-            coherence: 一致性分析结果
-            price_pred: 价格预测结果
-
-        返回:
-            (调整后的质量评分, 调整明细)
-        """
-        # 初始化调整信息
-        adjustment_info = {
-            "original_score": original_score,
-            "final_score": original_score,
-            "adjustments": []
-        }
-
-        # 1. 根据一致性进行调整
-        if coherence["agreement_level"] == "高度一致":
-            # 高度一致性加分
-            adjustment = min(1.0, original_score * 0.1)  # 最多加1分或原分数的10%
-            new_score = min(10.0, original_score + adjustment)
-            adjustment_info["adjustments"].append({
-                "reason": "高度时间框架一致性",
-                "value": adjustment
-            })
-        elif coherence["agreement_level"] == "较强一致":
-            # 较强一致性加分
-            adjustment = min(0.5, original_score * 0.05)  # 最多加0.5分或原分数的5%
-            new_score = min(10.0, original_score + adjustment)
-            adjustment_info["adjustments"].append({
-                "reason": "较强时间框架一致性",
-                "value": adjustment
-            })
-        elif coherence["agreement_level"] == "不一致":
-            # 不一致减分
-            adjustment = min(1.0, original_score * 0.1)  # 最多减1分或原分数的10%
-            new_score = max(0.0, original_score - adjustment)
-            adjustment_info["adjustments"].append({
-                "reason": "时间框架不一致",
-                "value": -adjustment
-            })
-        else:
-            # 中等或弱一致性小幅调整
-            new_score = original_score
-            adjustment_info["adjustments"].append({
-                "reason": "中等或弱一致性，小幅调整",
-                "value": 0
-            })
-
-        # 2. 根据价格预测调整
-        if price_pred.get("valid", False):
-            pred_direction = price_pred.get("direction")
-            pred_confidence = price_pred.get("confidence", 0)
-            pred_change_pct = price_pred.get("change_pct", 0)
-
-            # 如果预测看涨但分数低，或预测看跌但分数高，进行调整
-            if pred_direction == "UP" and original_score < 6.0:
-                # 上涨预测但质量评分较低，适当提升
-                adjustment = min(0.8, pred_confidence * 0.8)
-                new_score = new_score + adjustment
-                adjustment_info["adjustments"].append({
-                    "reason": f"预测上涨({pred_change_pct:+.2f}%)但原始评分较低",
-                    "value": adjustment
-                })
-            elif pred_direction == "DOWN" and original_score > 4.0:
-                # 下跌预测但质量评分较高，适当降低
-                adjustment = min(0.8, pred_confidence * 0.8)
-                new_score = new_score - adjustment
-                adjustment_info["adjustments"].append({
-                    "reason": f"预测下跌({pred_change_pct:+.2f}%)但原始评分较高",
-                    "value": -adjustment
-                })
-
-            # 预测幅度较大时的额外调整
-            if abs(pred_change_pct) > 2.0:
-                magnitude_factor = min(0.5, abs(pred_change_pct) * 0.1)
-
-                if pred_direction == "UP":
-                    # 大幅上涨预测，提升评分
-                    new_score = new_score + magnitude_factor
-                    adjustment_info["adjustments"].append({
-                        "reason": f"预测大幅上涨({pred_change_pct:+.2f}%)",
-                        "value": magnitude_factor
-                    })
-                else:
-                    # 大幅下跌预测，降低评分
-                    new_score = new_score - magnitude_factor
-                    adjustment_info["adjustments"].append({
-                        "reason": f"预测大幅下跌({pred_change_pct:+.2f}%)",
-                        "value": -magnitude_factor
-                    })
-
-        # 3. 调整趋势与预测方向不一致的情况
-        if price_pred.get("valid", False) and coherence.get("dominant_trend") != "NEUTRAL":
-            dom_trend = coherence.get("dominant_trend")
-            pred_direction = price_pred.get("direction")
-
-            if dom_trend and pred_direction and dom_trend != pred_direction:
-                # 趋势方向与预测方向不一致，降低评分置信度
-                adjustment = min(1.5, original_score * 0.15)
-                new_score = new_score - adjustment
-                adjustment_info["adjustments"].append({
-                    "reason": f"趋势方向({dom_trend})与预测方向({pred_direction})不一致",
-                    "value": -adjustment
-                })
-
-        # 确保最终分数在0-10范围内
-        new_score = max(0.0, min(10.0, new_score))
-        adjustment_info["final_score"] = new_score
-
-        # 打印调整结果
-        print_colored("\n===== 质量评分调整 =====", Colors.BLUE + Colors.BOLD)
-        print_colored(f"原始评分: {original_score:.2f}", Colors.INFO)
-
-        for adj in adjustment_info["adjustments"]:
-            if adj["value"] != 0:
-                adj_color = Colors.GREEN if adj["value"] > 0 else Colors.RED
-                print_colored(
-                    f"{adj['reason']}: {adj_color}{adj['value']:+.2f}{Colors.RESET}",
-                    Colors.INFO
-                )
-
-        print_colored(f"最终评分: {new_score:.2f}", Colors.INFO)
-
-        return new_score, adjustment_info
 
     def _calculate_support_resistance(self, symbol: str, timeframe_data: Dict[str, pd.DataFrame]) -> Dict[str, Any]:
         """计算支撑位和阻力位
@@ -1177,20 +977,9 @@ class EnhancedMTFCoordinator:
 
     def _detect_entry_opportunity(self, symbol: str, signal: str, timeframe_data: Dict[str, pd.DataFrame],
                                   support_resistance: Dict[str, Any], price_pred: Dict[str, Any]) -> Dict[str, Any]:
-        """检测更好的入场机会
-
-        参数:
-            symbol: 交易对
-            signal: 交易信号
-            timeframe_data: 时间框架数据
-            support_resistance: 支撑阻力位信息
-            price_pred: 价格预测信息
-
-        返回:
-            入场机会分析结果
-        """
+        """检测更好的入场机会 - 更少建议等待"""
         result = {
-            "recommendation": "PROCEED",  # PROCEED, WAIT
+            "recommendation": "PROCEED",  # 默认立即进行
             "reason": "可以立即入场",
             "target_price": None,
             "expected_minutes": 0
@@ -1227,7 +1016,7 @@ class EnhancedMTFCoordinator:
                         result["recommendation"] = "PROCEED"
                         result["reason"] = f"价格接近支撑位({nearest_support:.6f})且预测上涨，适合立即入场"
                     # 如果预测看跌且支撑位不远，可以等待回调
-                    elif pred_direction == "DOWN" and support_distance < 3.0:
+                    elif pred_direction == "DOWN" and support_distance < 1.5:  # 降低距离要求(原为3.0)
                         result["recommendation"] = "WAIT"
                         result["reason"] = f"预测价格可能回调至支撑位附近，建议等待"
                         result["target_price"] = nearest_support * 1.005  # 略高于支撑位
@@ -1236,7 +1025,7 @@ class EnhancedMTFCoordinator:
                         if predicted_price:
                             # 根据预测下跌速度估计时间
                             change_pct = (predicted_price - current_price) / current_price * 100
-                            time_horizon = price_pred.get("time_horizon", 60)  # 默认60分钟
+                            time_horizon = price_pred.get("time_horizon", 90)  # 默认90分钟
 
                             if change_pct < 0:  # 预测下跌
                                 target_change = (result["target_price"] - current_price) / current_price * 100
@@ -1246,7 +1035,7 @@ class EnhancedMTFCoordinator:
                     # 如果已经距离支撑位较远，考虑布林带位置
                     elif "BB_Middle" in timeframe_data["15m"].columns:
                         bb_middle = timeframe_data["15m"]['BB_Middle'].iloc[-1]
-                        if current_price > bb_middle * 1.01:  # 价格显著高于中轨
+                        if current_price > bb_middle * 1.02:  # 价格显著高于中轨(原为1.01)
                             result["recommendation"] = "WAIT"
                             result["reason"] = f"价格高于布林带中轨，可能有回调，建议等待"
                             result["target_price"] = bb_middle
@@ -1262,7 +1051,7 @@ class EnhancedMTFCoordinator:
                         result["recommendation"] = "PROCEED"
                         result["reason"] = f"价格接近阻力位({nearest_resistance:.6f})且预测下跌，适合立即入场"
                     # 如果预测看涨且阻力位不远，可以等待反弹
-                    elif pred_direction == "UP" and resistance_distance < 3.0:
+                    elif pred_direction == "UP" and resistance_distance < 1.5:  # 降低距离要求(原为3.0)
                         result["recommendation"] = "WAIT"
                         result["reason"] = f"预测价格可能反弹至阻力位附近，建议等待"
                         result["target_price"] = nearest_resistance * 0.995  # 略低于阻力位
@@ -1271,7 +1060,7 @@ class EnhancedMTFCoordinator:
                         if predicted_price:
                             # 根据预测上涨速度估计时间
                             change_pct = (predicted_price - current_price) / current_price * 100
-                            time_horizon = price_pred.get("time_horizon", 60)  # 默认60分钟
+                            time_horizon = price_pred.get("time_horizon", 90)  # 默认90分钟
 
                             if change_pct > 0:  # 预测上涨
                                 target_change = (result["target_price"] - current_price) / current_price * 100
@@ -1280,7 +1069,7 @@ class EnhancedMTFCoordinator:
                     # 如果已经距离阻力位较远，考虑布林带位置
                     elif "BB_Middle" in timeframe_data["15m"].columns:
                         bb_middle = timeframe_data["15m"]['BB_Middle'].iloc[-1]
-                        if current_price < bb_middle * 0.99:  # 价格显著低于中轨
+                        if current_price < bb_middle * 0.98:  # 价格显著低于中轨(原为0.99)
                             result["recommendation"] = "WAIT"
                             result["reason"] = f"价格低于布林带中轨，可能有反弹，建议等待"
                             result["target_price"] = bb_middle
@@ -1295,11 +1084,11 @@ class EnhancedMTFCoordinator:
                     recent_lows = df_1m['low'].tail(10).min()
                     volatility = (recent_highs - recent_lows) / current_price * 100
 
-                    if volatility > 1.0:  # 超过1%的短期波动
+                    if volatility > 2.0:  # 原为1.0，提高波动要求，使更少触发等待
                         # 对于买入信号，建议在低点入场
                         if signal in ["BUY", "LIGHT_UP"]:
                             avg_price = df_1m['close'].tail(5).mean()
-                            if current_price > avg_price * 1.005:  # 当前价格高于5分钟均价0.5%
+                            if current_price > avg_price * 1.008:  # 当前价格高于5分钟均价0.8%(原为0.5%)
                                 result["recommendation"] = "WAIT"
                                 result["reason"] = f"短期波动较大({volatility:.2f}%)且价格高于短期均价，建议等待回调"
                                 result["target_price"] = avg_price
@@ -1308,7 +1097,7 @@ class EnhancedMTFCoordinator:
                         # 对于卖出信号，建议在高点入场
                         elif signal in ["SELL", "LIGHT_DOWN"]:
                             avg_price = df_1m['close'].tail(5).mean()
-                            if current_price < avg_price * 0.995:  # 当前价格低于5分钟均价0.5%
+                            if current_price < avg_price * 0.992:  # 当前价格低于5分钟均价0.8%(原为0.5%)
                                 result["recommendation"] = "WAIT"
                                 result["reason"] = f"短期波动较大({volatility:.2f}%)且价格低于短期均价，建议等待反弹"
                                 result["target_price"] = avg_price
