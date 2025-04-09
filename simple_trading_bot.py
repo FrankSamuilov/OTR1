@@ -32,6 +32,13 @@ from integration_module import (
     comprehensive_market_analysis,
     generate_trade_recommendation
 )
+import os
+import json
+import time
+import datetime
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 
 # 在文件开头导入所需的模块后，添加这个类定义
@@ -978,187 +985,79 @@ class EnhancedTradingBot:
             f"📝 新增{symbol} {position_side}持仓，止盈: {take_profit * 100:.2f}%，止损: {abs(stop_loss) * 100:.2f}%",
             Colors.GREEN + Colors.BOLD)
 
-
     def close_position(self, symbol, position_side=None):
-        """
-        平仓指定货币对的持仓，增强版本 - 修复平仓失败问题
+        """平仓指定货币对的持仓，并记录历史"""
+        # 现有的平仓代码...
 
-        参数:
-            symbol: 交易对符号
-            position_side: 持仓方向 ('LONG', 'SHORT', None=全部平仓)
-
-        返回:
-            success: 是否成功平仓
-            closed_positions: 已平仓的持仓信息列表
-        """
-        try:
-            print(f"🔄 正在尝试平仓 {symbol} {position_side if position_side else '全部持仓'}")
-
-            # 获取当前持仓信息
-            positions = self.client.futures_position_information(symbol=symbol)
-            if not positions:
-                print(f"⚠️ 未找到 {symbol} 的持仓信息")
-                return False, []
-
-            # 筛选有实际持仓量的记录
-            active_positions = [pos for pos in positions if abs(float(pos.get('positionAmt', 0))) > 0]
-            if not active_positions:
-                print(f"⚠️ {symbol} 没有活跃持仓")
-                return False, []
-
-            print(f"📊 {symbol} 找到 {len(active_positions)} 个活跃持仓")
-
-            # 跟踪已平仓的持仓
-            closed_positions = []
-            success = False
-
-            for pos in active_positions:
-                amt = float(pos.get('positionAmt', 0))
-                current_side = pos.get('positionSide', 'BOTH')
-
-                # 如果指定了方向，只平仓该方向
-                if position_side is not None and current_side != position_side:
-                    print(f"➡️ 跳过 {symbol} {current_side} 持仓 (不匹配请求的方向 {position_side})")
-                    continue
-
-                # 确定平仓方向
-                close_side = "SELL" if amt > 0 else "BUY"
-
-                # 格式化数量，确保精度正确
-                quantity = abs(amt)
-
-                # 获取交易所数量精度信息
-                info = self.client.futures_exchange_info()
-                step_size = None
-
-                for item in info['symbols']:
-                    if item['symbol'] == symbol:
-                        for f in item['filters']:
-                            if f['filterType'] == 'LOT_SIZE':
-                                step_size = float(f['stepSize'])
-                                break
+        # 在成功平仓后添加以下代码（通常在函数的最后一部分，返回之前）：
+        if success:
+            # 为每个平仓的持仓记录历史信息
+            for closed_pos in closed_positions:
+                # 找到原始持仓信息
+                original_pos = None
+                for pos in positions:  # 这里的positions是从API获取的当前持仓信息
+                    if pos.get('positionSide') == closed_pos["position_side"] and pos.get('symbol') == symbol:
+                        original_pos = pos
                         break
 
-                # 应用精度
-                if step_size:
-                    precision = 0
-                    while step_size < 1:
-                        step_size *= 10
-                        precision += 1
+                # 如果找不到，尝试从本地持仓列表查找
+                if not original_pos:
+                    for pos in self.open_positions:
+                        if pos.get("position_side") == closed_pos["position_side"] and pos["symbol"] == symbol:
+                            original_pos = pos
+                            break
 
-                    quantity_str = f"{quantity:.{precision}f}"
-                else:
-                    # 默认精度
-                    quantity_str = f"{quantity:.6f}"
+                if original_pos:
+                    # 计算持仓时间
+                    open_time = float(original_pos.get("open_time", time.time() - 3600))
+                    holding_time = (time.time() - open_time) / 3600  # 小时
 
-                print(f"🔄 执行平仓: {symbol} {current_side}, 方向: {close_side}, 数量: {quantity_str}")
+                    # 计算盈亏
+                    if isinstance(original_pos, dict):
+                        # 本地持仓对象
+                        entry_price = float(original_pos.get("entry_price", 0))
+                    else:
+                        # API返回的持仓对象
+                        entry_price = float(original_pos.get("entryPrice", 0))
 
-                try:
-                    # 创建市价平仓订单
-                    order = self.client.futures_create_order(
-                        symbol=symbol,
-                        side=close_side,
-                        type="MARKET",
-                        quantity=quantity_str,
-                        positionSide=current_side,
-                        reduceOnly=True
-                    )
-
-                    print(f"✅ {symbol} {current_side} 平仓成功! 订单ID: {order.get('orderId', 'unknown')}")
-
-                    # 记录平仓信息
-                    closed_positions.append({
-                        "symbol": symbol,
-                        "position_side": current_side,
-                        "close_side": close_side,
-                        "quantity": quantity,
-                        "order_id": order.get("orderId", "unknown")
-                    })
-
-                    success = True
-
-                    # 记录日志
-                    self.logger.info(f"{symbol} {current_side} 平仓成功", extra={
-                        "quantity": quantity,
-                        "close_side": close_side,
-                        "order_id": order.get("orderId", "unknown")
-                    })
-
-                except Exception as e:
-                    error_msg = str(e)
-                    print(f"❌ {symbol} {current_side} 平仓失败: {error_msg}")
-
-                    # 记录详细错误
-                    if "insufficient balance" in error_msg.lower():
-                        print(f"  原因: 账户余额不足")
-                    elif "lot size" in error_msg.lower():
-                        print(f"  原因: 订单大小不符合要求, 尝试调整精度")
-                    elif "precision" in error_msg.lower():
-                        print(f"  原因: 数量精度不正确")
-
-                    self.logger.error(f"{symbol} {current_side} 平仓失败", extra={"error": error_msg})
-
-                    # 尝试使用替代方法平仓 - 使用position_information中的精确数量
+                    # 获取当前价格作为平仓价格
                     try:
-                        print(f"🔄 尝试替代方法平仓: {symbol} {current_side}")
+                        ticker = self.client.futures_symbol_ticker(symbol=symbol)
+                        exit_price = float(ticker['price'])
+                    except Exception as e:
+                        print(f"⚠️ 获取退出价格失败: {e}")
+                        exit_price = entry_price  # 默认值
 
-                        # 重新获取持仓信息
-                        updated_pos = self.client.futures_position_information(symbol=symbol)
-                        matching_pos = [p for p in updated_pos if
-                                        p.get('positionSide') == current_side and float(p.get('positionAmt', 0)) != 0]
+                    position_side_str = closed_pos.get("position_side", "LONG")
+                    if position_side_str == "LONG":
+                        profit_pct = (exit_price - entry_price) / entry_price * 100
+                    else:  # SHORT
+                        profit_pct = (entry_price - exit_price) / entry_price * 100
 
-                        if matching_pos:
-                            # 使用系统提供的精确数量
-                            precise_amt = matching_pos[0]['positionAmt']
+                    # 记录完整的持仓历史
+                    history_record = {
+                        "symbol": symbol,
+                        "position_side": position_side_str,
+                        "entry_price": entry_price,
+                        "exit_price": exit_price,
+                        "quantity": float(closed_pos.get("quantity", 0)),
+                        "open_time": open_time,
+                        "close_time": time.time(),
+                        "holding_time": holding_time,
+                        "profit_pct": profit_pct,
+                        "take_profit": 0.025,  # 固定2.5%止盈
+                        "stop_loss": -0.0175,  # 固定1.75%止损
+                        "close_reason": "take_profit" if profit_pct > 0 else "stop_loss"
+                    }
 
-                            # 创建市价平仓订单，不转换数量格式
-                            order = self.client.futures_create_order(
-                                symbol=symbol,
-                                side=close_side,
-                                type="MARKET",
-                                quantity=str(abs(float(precise_amt))),
-                                positionSide=current_side,
-                                reduceOnly=True
-                            )
+                    # 添加到历史记录
+                    self.position_history.append(history_record)
+                    print(f"📝 记录交易历史: {symbol} {position_side_str} 盈亏: {profit_pct:.2f}%")
 
-                            print(f"✅ 替代方法平仓成功! 订单ID: {order.get('orderId', 'unknown')}")
-                            success = True
+                    # 保存到文件
+                    self._save_position_history()
 
-                            # 记录平仓信息
-                            closed_positions.append({
-                                "symbol": symbol,
-                                "position_side": current_side,
-                                "close_side": close_side,
-                                "quantity": abs(float(precise_amt)),
-                                "order_id": order.get("orderId", "unknown")
-                            })
-
-                            self.logger.info(f"{symbol} {current_side} 替代方法平仓成功", extra={
-                                "quantity": abs(float(precise_amt)),
-                                "order_id": order.get("orderId", "unknown")
-                            })
-                        else:
-                            print(f"⚠️ 找不到匹配的持仓进行替代平仓")
-                    except Exception as alt_e:
-                        print(f"❌ 替代平仓方法也失败: {alt_e}")
-                        self.logger.error(f"{symbol} {current_side} 替代平仓失败", extra={"error": str(alt_e)})
-
-            # 更新本地持仓记录
-            if success:
-                if position_side:
-                    self.open_positions = [p for p in self.open_positions if
-                                           p["symbol"] != symbol or p.get("position_side") != position_side]
-                else:
-                    self.open_positions = [p for p in self.open_positions if p["symbol"] != symbol]
-
-                print(f"✅ 成功平仓 {len(closed_positions)} 个 {symbol} 持仓")
-
-            return success, closed_positions
-
-        except Exception as e:
-            print(f"❌ {symbol} 平仓过程中发生错误: {e}")
-            self.logger.error(f"{symbol} 平仓过程发生错误", extra={"error": str(e)})
-            return False, []
+        return success, closed_positions
 
     def manage_open_positions(self):
         """管理现有持仓，确保使用固定的止盈止损比例"""
@@ -1408,9 +1307,364 @@ class EnhancedTradingBot:
         print("-" * 50)
 
 
+def _save_position_history(self):
+    """保存持仓历史到文件"""
+    try:
+        with open("position_history.json", "w") as f:
+            json.dump(self.position_history, f, indent=4)
+    except Exception as e:
+        print(f"❌ 保存持仓历史失败: {e}")
+
+
+def _load_position_history(self):
+    """从文件加载持仓历史"""
+    try:
+        if os.path.exists("position_history.json"):
+            with open("position_history.json", "r") as f:
+                self.position_history = json.load(f)
+        else:
+            self.position_history = []
+    except Exception as e:
+        print(f"❌ 加载持仓历史失败: {e}")
+        self.position_history = []
+
+
+def analyze_position_statistics(self):
+    """分析并显示持仓统计数据"""
+    # 基本统计
+    stats = {
+        "total_trades": len(self.position_history),
+        "winning_trades": 0,
+        "losing_trades": 0,
+        "total_profit": 0.0,
+        "total_loss": 0.0,
+        "avg_holding_time": 0.0,
+        "symbols": {},
+        "hourly_distribution": [0] * 24,  # 24小时
+        "daily_distribution": [0] * 7,  # 周一到周日
+    }
+
+    holding_times = []
+
+    for pos in self.position_history:
+        profit = pos.get("profit_pct", 0)
+        symbol = pos.get("symbol", "unknown")
+        holding_time = pos.get("holding_time", 0)  # 小时
+
+        # 按交易对统计
+        if symbol not in stats["symbols"]:
+            stats["symbols"][symbol] = {
+                "total": 0,
+                "wins": 0,
+                "losses": 0,
+                "profit": 0.0,
+                "loss": 0.0
+            }
+
+        stats["symbols"][symbol]["total"] += 1
+
+        # 胜率与盈亏统计
+        if profit > 0:
+            stats["winning_trades"] += 1
+            stats["total_profit"] += profit
+            stats["symbols"][symbol]["wins"] += 1
+            stats["symbols"][symbol]["profit"] += profit
+        else:
+            stats["losing_trades"] += 1
+            stats["total_loss"] += abs(profit)
+            stats["symbols"][symbol]["losses"] += 1
+            stats["symbols"][symbol]["loss"] += abs(profit)
+
+        # 时间统计
+        if holding_time > 0:
+            holding_times.append(holding_time)
+
+        # 小时分布
+        if "open_time" in pos:
+            open_time = datetime.datetime.fromtimestamp(pos["open_time"])
+            stats["hourly_distribution"][open_time.hour] += 1
+            stats["daily_distribution"][open_time.weekday()] += 1
+
+    # 计算平均持仓时间
+    if holding_times:
+        stats["avg_holding_time"] = sum(holding_times) / len(holding_times)
+
+    # 计算胜率
+    if stats["total_trades"] > 0:
+        stats["win_rate"] = stats["winning_trades"] / stats["total_trades"] * 100
+    else:
+        stats["win_rate"] = 0
+
+    # 计算盈亏比
+    if stats["total_loss"] > 0:
+        stats["profit_loss_ratio"] = stats["total_profit"] / stats["total_loss"]
+    else:
+        stats["profit_loss_ratio"] = float('inf')  # 无亏损
+
+    # 计算每个交易对的胜率和平均盈亏
+    for symbol, data in stats["symbols"].items():
+        if data["total"] > 0:
+            data["win_rate"] = data["wins"] / data["total"] * 100
+            data["avg_profit"] = data["profit"] / data["wins"] if data["wins"] > 0 else 0
+            data["avg_loss"] = data["loss"] / data["losses"] if data["losses"] > 0 else 0
+            data["net_profit"] = data["profit"] - data["loss"]
+
+    return stats
+
+
+def generate_statistics_charts(self, stats):
+    """生成统计图表"""
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    from matplotlib.dates import DateFormatter
+
+    # 确保目录存在
+    charts_dir = "statistics_charts"
+    if not os.path.exists(charts_dir):
+        os.makedirs(charts_dir)
+
+    # 设置样式
+    plt.style.use('seaborn-v0_8-whitegrid')  # 使用兼容的样式
+
+    # 1. 交易对胜率对比图
+    plt.figure(figsize=(12, 6))
+    symbols = list(stats["symbols"].keys())
+    win_rates = [data["win_rate"] for data in stats["symbols"].values()]
+    trades = [data["total"] for data in stats["symbols"].values()]
+
+    # 按交易次数排序
+    sorted_idx = sorted(range(len(trades)), key=lambda i: trades[i], reverse=True)
+    symbols = [symbols[i] for i in sorted_idx]
+    win_rates = [win_rates[i] for i in sorted_idx]
+    trades = [trades[i] for i in sorted_idx]
+
+    colors = ['green' if wr >= 50 else 'red' for wr in win_rates]
+
+    if symbols:  # 确保有数据
+        plt.bar(symbols, win_rates, color=colors)
+        plt.axhline(y=50, color='black', linestyle='--', alpha=0.7)
+        plt.xlabel('交易对')
+        plt.ylabel('胜率 (%)')
+        plt.title('各交易对胜率对比')
+        plt.xticks(rotation=45)
+
+        # 添加交易次数标签
+        for i, v in enumerate(win_rates):
+            plt.text(i, v + 2, f"{trades[i]}次", ha='center')
+
+        plt.tight_layout()
+        plt.savefig(f"{charts_dir}/symbol_win_rates.png")
+    plt.close()
+
+    # 2. 日内交易分布
+    plt.figure(figsize=(12, 6))
+    plt.bar(range(24), stats["hourly_distribution"])
+    plt.xlabel('小时')
+    plt.ylabel('交易次数')
+    plt.title('日内交易时间分布')
+    plt.xticks(range(24))
+    plt.tight_layout()
+    plt.savefig(f"{charts_dir}/hourly_distribution.png")
+    plt.close()
+
+    # 3. 每周交易分布
+    plt.figure(figsize=(10, 6))
+    days = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
+    plt.bar(days, stats["daily_distribution"])
+    plt.xlabel('星期')
+    plt.ylabel('交易次数')
+    plt.title('每周交易日分布')
+    plt.tight_layout()
+    plt.savefig(f"{charts_dir}/daily_distribution.png")
+    plt.close()
+
+    # 4. 交易对净利润对比
+    plt.figure(figsize=(12, 6))
+    sorted_symbols = sorted(stats["symbols"].items(), key=lambda x: x[1]["total"], reverse=True)
+    net_profits = [data["net_profit"] for _, data in sorted_symbols]
+    symbols_sorted = [s for s, _ in sorted_symbols]
+
+    if symbols_sorted:  # 确保有数据
+        colors = ['green' if np >= 0 else 'red' for np in net_profits]
+        plt.bar(symbols_sorted, net_profits, color=colors)
+        plt.axhline(y=0, color='black', linestyle='-', alpha=0.3)
+        plt.xlabel('交易对')
+        plt.ylabel('净利润 (%)')
+        plt.title('各交易对净利润对比')
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+    plt.savefig(f"{charts_dir}/symbol_net_profits.png")
+    plt.close()
+
+    # 5. 盈亏分布图
+    if self.position_history:
+        profits = [pos.get("profit_pct", 0) for pos in self.position_history]
+        plt.figure(figsize=(12, 6))
+        sns.histplot(profits, bins=20, kde=True)
+        plt.axvline(x=0, color='red', linestyle='--', alpha=0.7)
+        plt.xlabel('盈亏百分比 (%)')
+        plt.ylabel('次数')
+        plt.title('交易盈亏分布')
+        plt.tight_layout()
+        plt.savefig(f"{charts_dir}/profit_distribution.png")
+    plt.close()
+
+
+def generate_statistics_report(self, stats):
+    """生成HTML统计报告"""
+    report_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>交易统计报告 - {report_time}</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; margin: 20px; }}
+            h1, h2, h3 {{ color: #333; }}
+            .stat-card {{ background-color: #f9f9f9; border-radius: 5px; padding: 15px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+            .green {{ color: green; }}
+            .red {{ color: red; }}
+            table {{ border-collapse: collapse; width: 100%; margin-bottom: 20px; }}
+            th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+            th {{ background-color: #f2f2f2; }}
+            tr:nth-child(even) {{ background-color: #f9f9f9; }}
+            .chart-container {{ display: flex; flex-wrap: wrap; justify-content: space-between; }}
+            .chart {{ width: 48%; margin-bottom: 20px; }}
+            @media (max-width: 768px) {{ .chart {{ width: 100%; }} }}
+        </style>
+    </head>
+    <body>
+        <h1>交易统计报告</h1>
+        <p>生成时间: {report_time}</p>
+
+        <div class="stat-card">
+            <h2>总体概览</h2>
+            <table>
+                <tr><th>指标</th><th>数值</th></tr>
+                <tr><td>总交易次数</td><td>{stats['total_trades']}</td></tr>
+                <tr><td>盈利交易</td><td>{stats['winning_trades']} ({stats['win_rate']:.2f}%)</td></tr>
+                <tr><td>亏损交易</td><td>{stats['losing_trades']}</td></tr>
+                <tr><td>总盈利</td><td class="green">{stats['total_profit']:.2f}%</td></tr>
+                <tr><td>总亏损</td><td class="red">{stats['total_loss']:.2f}%</td></tr>
+                <tr><td>净盈亏</td><td class="{('green' if stats['total_profit'] > stats['total_loss'] else 'red')}">{stats['total_profit'] - stats['total_loss']:.2f}%</td></tr>
+                <tr><td>盈亏比</td><td>{stats['profit_loss_ratio']:.2f}</td></tr>
+                <tr><td>平均持仓时间</td><td>{stats['avg_holding_time']:.2f} 小时</td></tr>
+            </table>
+        </div>
+
+        <div class="stat-card">
+            <h2>交易对分析</h2>
+            <table>
+                <tr>
+                    <th>交易对</th>
+                    <th>交易次数</th>
+                    <th>胜率</th>
+                    <th>平均盈利</th>
+                    <th>平均亏损</th>
+                    <th>净盈亏</th>
+                </tr>
+    """
+
+    # 按交易次数排序
+    sorted_symbols = sorted(stats["symbols"].items(), key=lambda x: x[1]["total"], reverse=True)
+
+    for symbol, data in sorted_symbols:
+        html += f"""
+                <tr>
+                    <td>{symbol}</td>
+                    <td>{data['total']}</td>
+                    <td>{data['win_rate']:.2f}%</td>
+                    <td class="green">{data['avg_profit']:.2f}%</td>
+                    <td class="red">{data['avg_loss']:.2f}%</td>
+                    <td class="{('green' if data['net_profit'] >= 0 else 'red')}">{data['net_profit']:.2f}%</td>
+                </tr>
+        """
+
+    html += """
+            </table>
+        </div>
+
+        <div class="chart-container">
+            <div class="chart">
+                <h3>交易对胜率对比</h3>
+                <img src="statistics_charts/symbol_win_rates.png" width="100%">
+            </div>
+            <div class="chart">
+                <h3>交易对净利润对比</h3>
+                <img src="statistics_charts/symbol_net_profits.png" width="100%">
+            </div>
+            <div class="chart">
+                <h3>日内交易时间分布</h3>
+                <img src="statistics_charts/hourly_distribution.png" width="100%">
+            </div>
+            <div class="chart">
+                <h3>每周交易日分布</h3>
+                <img src="statistics_charts/daily_distribution.png" width="100%">
+            </div>
+            <div class="chart">
+                <h3>交易盈亏分布</h3>
+                <img src="statistics_charts/profit_distribution.png" width="100%">
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+
+    # 写入HTML文件
+    with open("trading_statistics_report.html", "w") as f:
+        f.write(html)
+
+    print(f"✅ 统计报告已生成: trading_statistics_report.html")
+    return "trading_statistics_report.html"
+
+
+def show_statistics(self):
+    """显示交易统计信息"""
+    # 加载持仓历史
+    self._load_position_history()
+
+    if not self.position_history:
+        print("⚠️ 没有交易历史记录，无法生成统计")
+        return
+
+    print(f"📊 生成交易统计，共 {len(self.position_history)} 条记录")
+
+    # 分析数据
+    stats = self.analyze_position_statistics()
+
+    # 生成图表
+    self.generate_statistics_charts(stats)
+
+    # 生成报告
+    report_file = self.generate_statistics_report(stats)
+
+    # 显示简要统计
+    print("\n===== 交易统计摘要 =====")
+    print(f"总交易: {stats['total_trades']} 次")
+    print(f"盈利交易: {stats['winning_trades']} 次 ({stats['win_rate']:.2f}%)")
+    print(f"亏损交易: {stats['losing_trades']} 次")
+    print(f"总盈利: {stats['total_profit']:.2f}%")
+    print(f"总亏损: {stats['total_loss']:.2f}%")
+    print(f"净盈亏: {stats['total_profit'] - stats['total_loss']:.2f}%")
+    print(f"盈亏比: {stats['profit_loss_ratio']:.2f}")
+    print(f"平均持仓时间: {stats['avg_holding_time']:.2f} 小时")
+    print(f"详细报告: {report_file}")
+
+
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description='增强版交易机器人')
+    parser.add_argument('--stats', action='store_true', help='生成交易统计报告')
+    args = parser.parse_args()
+
     API_KEY = "lnfs30CvqF8cCIdRcIfW6kKnGGpLoRzTUrwdRslTX4e7a0O6OJ3SYsUT6gF1B26W"
     API_SECRET = "llSlxBLrrxh21ugMzli5x6NveNrwQyLBI7YEgTR4VOMyTmVP6V9uqmrN90hX10cn"
 
     bot = EnhancedTradingBot(API_KEY, API_SECRET, CONFIG)
-    bot.trade()
+
+    if args.stats:
+        bot.show_statistics()
+    else:
+        bot.trade()
