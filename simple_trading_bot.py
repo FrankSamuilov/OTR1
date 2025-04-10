@@ -25,7 +25,7 @@ import datetime
 import time
 from integration_module import calculate_enhanced_indicators, generate_trade_recommendation
 from multi_timeframe_module import MultiTimeframeCoordinator
-from EnhancedMTFCoordinator import EnhancedMTFCoordinator
+
 # 导入集成模块（这是最简单的方法，因为它整合了所有其他模块的功能）
 from integration_module import (
     calculate_enhanced_indicators,
@@ -583,84 +583,83 @@ class EnhancedTradingBot:
             return None
 
     def generate_trade_signal(self, df, symbol):
-
-        df.name = symbol  # Set name for logging reference
+        """生成更积极的交易信号，降低了预期变动和质量评分阈值"""
 
         if df is None or len(df) < 20:
-            self.logger.warning(f"{symbol} insufficient data, cannot generate signal")
             return "HOLD", 0
 
         try:
-            # Calculate indicators
+            # 计算指标
             df = calculate_optimized_indicators(df)
             if df is None or df.empty:
-                self.logger.warning(f"{symbol} indicator calculation failed")
                 return "HOLD", 0
 
-            # Calculate quality score
+            # 计算质量评分
             quality_score, metrics = calculate_quality_score(df, self.client, symbol, None, self.config, self.logger)
-            print_colored(f"{symbol} initial quality score: {quality_score:.2f}", Colors.INFO)
+            print_colored(f"{symbol} 初始质量评分: {quality_score:.2f}", Colors.INFO)
 
-            # Check for pending entry opportunities
-            pending_entry = self.mtf_coordinator.check_pending_entries(symbol)
-            if pending_entry["should_enter"]:
-                return pending_entry["signal"], pending_entry["quality_score"]
-
-            # Get signal from multi-timeframe coordinator
+            # 获取多时间框架信号
             signal, adjusted_score, details = self.mtf_coordinator.generate_signal(symbol, quality_score)
+            print_colored(f"多时间框架信号: {signal}, 调整后评分: {adjusted_score:.2f}", Colors.INFO)
 
-            # Get current price and predicted price to calculate expected movement
-            current_price = None
+            # 打印一致性分析详情
+            coherence = details.get("coherence", {})
+            print_colored(f"{symbol} 一致性分析:", Colors.INFO)
+            print_colored(f"  一致性级别: {coherence.get('agreement_level', '未知')}", Colors.INFO)
+            print_colored(f"  主导趋势: {coherence.get('dominant_trend', '未知')}", Colors.INFO)
+            print_colored(f"  推荐: {coherence.get('recommendation', '未知')}", Colors.INFO)
+
+            # 获取当前价格
             try:
                 ticker = self.client.futures_symbol_ticker(symbol=symbol)
                 current_price = float(ticker['price'])
             except Exception as e:
-                print_colored(f"Cannot get current price for {symbol}: {e}", Colors.WARNING)
                 return "HOLD", 0
 
-            # Get price prediction
-            predicted_price = None
-            price_pred = details.get("price_prediction", {})
-            if price_pred and price_pred.get("valid", False):
-                predicted_price = price_pred.get("predicted_price")
-            else:
-                predicted_price = self.predict_short_term_price(symbol, horizon_minutes=60)
-
+            # 获取价格预测
+            predicted_price = self.predict_short_term_price(symbol, horizon_minutes=60)
             if predicted_price is None:
-                print_colored(f"Cannot predict price for {symbol}", Colors.WARNING)
-                return "HOLD", 0
+                # 默认假设5%变动
+                predicted_price = current_price * (1.05 if signal == "BUY" else 0.95)
 
-            # Calculate expected price movement percentage
+            # 计算预期变动
             expected_movement = abs(predicted_price - current_price) / current_price * 100
+            print_colored(f"{symbol} 预期价格变动: {expected_movement:.2f}%", Colors.INFO)
 
-            # Skip if expected movement is too small (less than 2.5%)
-            if expected_movement < 2.5:
-                print_colored(
-                    f"Expected movement ({expected_movement:.2f}%) too small for {symbol}, minimum required: 2.5%",
-                    Colors.YELLOW)
+            # 降低最小预期变动要求 (从2.5%改为1.0%)
+            min_movement = 1.0
+
+            # 只有当信号明确为"NEUTRAL"且预期变动很小时才保持观望
+            if signal == "NEUTRAL" and expected_movement < min_movement:
+                print_colored(f"{symbol} 无明确信号且预期变动({expected_movement:.2f}%)小于{min_movement}%",
+                              Colors.YELLOW)
                 return "HOLD", 0
 
-            # Make the signal decision
-            # More aggressive logic - lower the threshold for valid signals
-            if adjusted_score >= 5.5 and signal in ["BUY", "LIGHT_UP"]:
+            # 更积极的信号生成 - 降低质量评分阈值
+            if adjusted_score >= 5.0 and "BUY" in signal:
                 final_signal = "BUY"
-            elif adjusted_score <= 4.5 and signal in ["SELL", "LIGHT_DOWN"]:
+            elif adjusted_score <= 5.0 and "SELL" in signal:
                 final_signal = "SELL"
-            elif signal == "NEUTRAL":
-                final_signal = "HOLD"
-            else:
-                # Handle LIGHT signals
-                if signal == "LIGHT_UP":
+            elif coherence.get("recommendation") == "BUY" and adjusted_score >= 4.5:
+                final_signal = "BUY"
+            elif coherence.get("recommendation") == "SELL" and adjusted_score <= 5.5:
+                final_signal = "SELL"
+            # 特殊处理黄金ETF
+            elif symbol == "PAXGUSDT":
+                if adjusted_score >= 5.0:
                     final_signal = "BUY"
-                elif signal == "LIGHT_DOWN":
-                    final_signal = "SELL"
+                    print_colored(f"为 PAXGUSDT 生成特殊 BUY 信号", Colors.GREEN)
                 else:
-                    final_signal = "HOLD"
+                    final_signal = "SELL"
+                    print_colored(f"为 PAXGUSDT 生成特殊 SELL 信号", Colors.RED)
+            else:
+                final_signal = "HOLD"
 
+            print_colored(f"{symbol} 最终信号: {final_signal}, 评分: {adjusted_score:.2f}", Colors.INFO)
             return final_signal, adjusted_score
 
         except Exception as e:
-            self.logger.error(f"{symbol} signal generation failed: {e}")
+            self.logger.error(f"{symbol} 信号生成失败: {e}")
             return "HOLD", 0
 
     def place_hedge_orders(self, symbol, primary_side, quality_score):
@@ -986,39 +985,74 @@ class EnhancedTradingBot:
             Colors.GREEN + Colors.BOLD)
 
     def close_position(self, symbol, position_side=None):
-        """平仓指定货币对的持仓，并记录历史"""
-        # 现有的平仓代码...
+        """平仓指定货币对的持仓，并记录历史
 
-        # 在成功平仓后添加以下代码（通常在函数的最后一部分，返回之前）：
-        if success:
-            # 为每个平仓的持仓记录历史信息
-            for closed_pos in closed_positions:
-                # 找到原始持仓信息
-                original_pos = None
-                for pos in positions:  # 这里的positions是从API获取的当前持仓信息
-                    if pos.get('positionSide') == closed_pos["position_side"] and pos.get('symbol') == symbol:
-                        original_pos = pos
-                        break
+        参数:
+            symbol: 交易对符号
+            position_side: 持仓方向 ('LONG' 或 'SHORT')，不指定则平仓所有方向
 
-                # 如果找不到，尝试从本地持仓列表查找
-                if not original_pos:
-                    for pos in self.open_positions:
-                        if pos.get("position_side") == closed_pos["position_side"] and pos["symbol"] == symbol:
-                            original_pos = pos
-                            break
+        返回:
+            (success, closed_positions): 平仓是否成功及平仓的持仓列表
+        """
+        closed_positions = []
+        success = False  # 初始化 success 变量
 
-                if original_pos:
-                    # 计算持仓时间
-                    open_time = float(original_pos.get("open_time", time.time() - 3600))
-                    holding_time = (time.time() - open_time) / 3600  # 小时
+        try:
+            # 首先检查本地持仓信息
+            positions = []
+            for pos in self.open_positions:
+                if pos["symbol"] == symbol:
+                    if position_side is None or pos.get("position_side", "LONG") == position_side:
+                        positions.append(pos)
 
-                    # 计算盈亏
-                    if isinstance(original_pos, dict):
-                        # 本地持仓对象
-                        entry_price = float(original_pos.get("entry_price", 0))
+            if not positions:
+                print(f"⚠️ 未找到 {symbol} {position_side or '任意方向'} 的持仓")
+                self.logger.warning(f"未找到持仓", extra={"symbol": symbol, "position_side": position_side})
+                return False, []
+
+            # 平仓每个匹配的持仓
+            for pos in positions:
+                side = "SELL" if pos.get("position_side", "LONG") == "LONG" else "BUY"
+                quantity = pos["quantity"]
+                close_success = False
+
+                print(f"📉 平仓 {symbol} {pos.get('position_side', 'LONG')}, 数量: {quantity}")
+
+                try:
+                    # 使用市价单平仓
+                    if hasattr(self, 'hedge_mode_enabled') and self.hedge_mode_enabled:
+                        # 双向持仓模式
+                        order = self.client.futures_create_order(
+                            symbol=symbol,
+                            side=side,
+                            type="MARKET",
+                            quantity=format_quantity(symbol, quantity),
+                            positionSide=pos.get("position_side", "LONG")
+                        )
                     else:
-                        # API返回的持仓对象
-                        entry_price = float(original_pos.get("entryPrice", 0))
+                        # 单向持仓模式
+                        order = self.client.futures_create_order(
+                            symbol=symbol,
+                            side=side,
+                            type="MARKET",
+                            quantity=format_quantity(symbol, quantity),
+                            reduceOnly=True
+                        )
+
+                    # 平仓成功
+                    close_success = True
+                    closed_positions.append(pos)
+
+                    # 记录平仓信息
+                    self.logger.info(f"{symbol} {pos.get('position_side', 'LONG')} 平仓成功", extra={
+                        "quantity": quantity,
+                        "exit_side": side,
+                        "order_id": order.get("orderId", "unknown")
+                    })
+
+                    # 计算持仓时间
+                    entry_time = pos.get("open_time", time.time() - 3600)
+                    holding_hours = (time.time() - entry_time) / 3600
 
                     # 获取当前价格作为平仓价格
                     try:
@@ -1026,38 +1060,62 @@ class EnhancedTradingBot:
                         exit_price = float(ticker['price'])
                     except Exception as e:
                         print(f"⚠️ 获取退出价格失败: {e}")
-                        exit_price = entry_price  # 默认值
+                        exit_price = pos.get("entry_price", 0)  # 默认值
 
-                    position_side_str = closed_pos.get("position_side", "LONG")
-                    if position_side_str == "LONG":
+                    # 计算盈亏
+                    entry_price = pos.get("entry_price", 0)
+                    if pos.get("position_side", "LONG") == "LONG":
                         profit_pct = (exit_price - entry_price) / entry_price * 100
-                    else:  # SHORT
+                    else:
                         profit_pct = (entry_price - exit_price) / entry_price * 100
 
                     # 记录完整的持仓历史
-                    history_record = {
-                        "symbol": symbol,
-                        "position_side": position_side_str,
-                        "entry_price": entry_price,
-                        "exit_price": exit_price,
-                        "quantity": float(closed_pos.get("quantity", 0)),
-                        "open_time": open_time,
-                        "close_time": time.time(),
-                        "holding_time": holding_time,
-                        "profit_pct": profit_pct,
-                        "take_profit": 0.025,  # 固定2.5%止盈
-                        "stop_loss": -0.0175,  # 固定1.75%止损
-                        "close_reason": "take_profit" if profit_pct > 0 else "stop_loss"
-                    }
+                    if hasattr(self, 'position_history'):
+                        history_record = {
+                            "symbol": symbol,
+                            "position_side": pos.get("position_side", "LONG"),
+                            "entry_price": entry_price,
+                            "exit_price": exit_price,
+                            "quantity": quantity,
+                            "open_time": entry_time,
+                            "close_time": time.time(),
+                            "holding_time": holding_hours,
+                            "profit_pct": profit_pct,
+                            "take_profit": pos.get("dynamic_take_profit", 0.025),
+                            "stop_loss": pos.get("stop_loss", -0.0175),
+                            "close_reason": "take_profit" if profit_pct > 0 else "stop_loss"
+                        }
 
-                    # 添加到历史记录
-                    self.position_history.append(history_record)
-                    print(f"📝 记录交易历史: {symbol} {position_side_str} 盈亏: {profit_pct:.2f}%")
+                        # 添加到历史记录
+                        self.position_history.append(history_record)
+                        print(f"📝 记录交易历史: {symbol} {pos.get('position_side', 'LONG')} 盈亏: {profit_pct:.2f}%")
 
-                    # 保存到文件
-                    self._save_position_history()
+                        # 保存到文件
+                        if hasattr(self, '_save_position_history'):
+                            self._save_position_history()
 
-        return success, closed_positions
+                except Exception as e:
+                    print(f"❌ {symbol} {pos.get('position_side', 'LONG')} 平仓失败: {e}")
+                    self.logger.error(f"{symbol} 平仓失败", extra={"error": str(e)})
+                    close_success = False
+
+            # 如果有任何一个持仓平仓成功，就认为整体成功
+            success = any(pos in closed_positions for pos in positions)
+
+            # 从本地持仓列表中移除已平仓的持仓
+            for pos in closed_positions:
+                if pos in self.open_positions:
+                    self.open_positions.remove(pos)
+
+            # 重新加载持仓以确保数据最新
+            self.load_existing_positions()
+
+            return success, closed_positions
+
+        except Exception as e:
+            print(f"❌ 平仓过程中发生错误: {e}")
+            self.logger.error(f"平仓过程错误", extra={"symbol": symbol, "error": str(e)})
+            return False, []
 
     def manage_open_positions(self):
         """管理现有持仓，确保使用固定的止盈止损比例"""
