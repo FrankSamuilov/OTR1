@@ -1019,6 +1019,24 @@ class EnhancedTradingBot:
                 print(f"📉 平仓 {symbol} {pos.get('position_side', 'LONG')}, 数量: {quantity}")
 
                 try:
+                    # 处理数量格式化
+                    try:
+                        # 优先使用format_quantity函数如果存在
+                        if hasattr(self, 'format_quantity'):
+                            formatted_qty = self.format_quantity(symbol, quantity)
+                        else:
+                            # 备用格式化方法
+                            precision = 3  # 默认精度
+                            formatted_qty = str(round(float(quantity), precision))
+                            # 确保不使用科学计数法
+                            if 'e' in formatted_qty.lower():
+                                formatted_qty = f"{float(quantity):.8f}".rstrip('0').rstrip('.')
+                    except Exception as e:
+                        print(f"⚠️ 数量格式化失败: {e}, 尝试直接使用原始数量")
+                        formatted_qty = str(quantity)  # 直接使用原始数量的字符串形式
+
+                    print(f"📊 使用格式化数量: {formatted_qty}")
+
                     # 使用市价单平仓
                     if hasattr(self, 'hedge_mode_enabled') and self.hedge_mode_enabled:
                         # 双向持仓模式
@@ -1026,7 +1044,7 @@ class EnhancedTradingBot:
                             symbol=symbol,
                             side=side,
                             type="MARKET",
-                            quantity=format_quantity(symbol, quantity),
+                            quantity=formatted_qty,
                             positionSide=pos.get("position_side", "LONG")
                         )
                     else:
@@ -1035,7 +1053,7 @@ class EnhancedTradingBot:
                             symbol=symbol,
                             side=side,
                             type="MARKET",
-                            quantity=format_quantity(symbol, quantity),
+                            quantity=formatted_qty,
                             reduceOnly=True
                         )
 

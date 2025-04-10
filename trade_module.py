@@ -156,20 +156,53 @@ def get_precise_quantity(client, symbol, quantity):
         return round(quantity, 4)  # 出错时使用默认精度
 
 
-def format_quantity(quantity, precision):
+def format_quantity(self, symbol, quantity):
     """
-    格式化数量为正确的字符串格式
+    格式化交易数量，确保符合交易所要求
 
     参数:
-        quantity: 数量
-        precision: 精度
+        symbol: 交易对符号
+        quantity: 原始数量
 
     返回:
         格式化后的数量字符串
     """
-    # 使用指定精度格式化
-    format_str = f"{{:.{precision}f}}"
-    return format_str.format(quantity)
+    try:
+        # 获取交易对信息
+        info = self.client.futures_exchange_info()
+
+        # 默认精度（如果无法获取特定交易对信息）
+        precision = 3
+
+        # 查找该交易对的精度信息
+        for item in info['symbols']:
+            if item['symbol'] == symbol:
+                for f in item['filters']:
+                    if f['filterType'] == 'LOT_SIZE':
+                        step_size = float(f['stepSize'])
+                        precision = int(round(-math.log(step_size, 10), 0)) if step_size < 1 else 0
+                break
+
+        # 四舍五入到适当精度
+        formatted_quantity = round(float(quantity), precision)
+
+        # 转为字符串，避免科学计数法
+        if precision > 0:
+            quantity_str = f"{{:.{precision}f}}".format(formatted_quantity)
+        else:
+            quantity_str = str(int(formatted_quantity))
+
+        return quantity_str
+
+    except Exception as e:
+        print(f"❌ 格式化数量出错 ({symbol}, {quantity}): {e}")
+        # 作为后备方案，尝试简单格式化
+        try:
+            # 尝试使用最基本的格式化，去除小数点后的零
+            return str(float(quantity)).rstrip('0').rstrip('.') if '.' in str(float(quantity)) else str(int(quantity))
+        except:
+            # 如果还是失败，直接返回原始数量的字符串
+            return str(quantity)
 
 
 def adjust_quantity_for_leverage(quantity, leverage, current_price, account_balance, max_risk_pct=20.0):
