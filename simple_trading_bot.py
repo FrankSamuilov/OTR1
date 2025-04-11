@@ -55,7 +55,11 @@ class EnhancedTradingBot:
         self.quality_score_history = {}  # 存储质量评分历史
         self.similar_patterns_history = {}  # 存储相似模式历史
         self.hedge_mode_enabled = True  # 默认启用双向持仓
-
+        self.dynamic_take_profit = 0.025  # 默认2.5%止盈
+        self.dynamic_stop_loss = -0.0175  # 默认1.75%止损
+        self.market_bias = "neutral"  # 市场偏向：bullish/bearish/neutral
+        self.trend_priority = False  # 是否优先考虑趋势明确的交易对
+        self.strong_trend_symbols = []  # 趋势明确的交易对列表
         # 多时间框架协调器初始化
         self.mtf_coordinator = MultiTimeframeCoordinator(self.client, self.logger)
         print("✅ 多时间框架协调器初始化完成")
@@ -92,9 +96,6 @@ class EnhancedTradingBot:
     def active_position_monitor(self, check_interval=15):
         """
         主动监控持仓，确保及时执行止盈止损
-
-        参数:
-            check_interval: 检查间隔（秒）
         """
         print(f"🔄 启动主动持仓监控（每{check_interval}秒检查一次）")
 
@@ -104,6 +105,9 @@ class EnhancedTradingBot:
                 if not self.open_positions:
                     time.sleep(check_interval)
                     continue
+
+                # 加载最新持仓
+                self.load_existing_positions()
 
                 # 当前持仓列表的副本，用于检查
                 positions = self.open_positions.copy()
@@ -118,6 +122,7 @@ class EnhancedTradingBot:
                         ticker = self.client.futures_symbol_ticker(symbol=symbol)
                         current_price = float(ticker['price'])
                     except Exception as e:
+                        print(f"⚠️ 获取{symbol}价格失败: {e}")
                         continue
 
                     # 计算利润百分比
@@ -126,9 +131,14 @@ class EnhancedTradingBot:
                     else:  # SHORT
                         profit_pct = (entry_price - current_price) / entry_price
 
-                    # 使用固定的止盈止损比例
+                    # 确保使用固定的止盈止损比例
                     take_profit = 0.025  # 固定2.5%止盈
                     stop_loss = -0.0175  # 固定1.75%止损
+
+                    # 日志记录当前状态
+                    if check_interval % 60 == 0:  # 每分钟记录一次
+                        print(
+                            f"{symbol} {position_side}: 盈亏 {profit_pct:.2%}, 止盈 {take_profit:.2%}, 止损 {stop_loss:.2%}")
 
                     # 检查止盈条件
                     if profit_pct >= take_profit:
@@ -143,10 +153,8 @@ class EnhancedTradingBot:
                                 "entry_price": entry_price,
                                 "exit_price": current_price
                             })
-                        else:
-                            print(f"❌ {symbol} {position_side} 止盈平仓失败")
 
-                    # 检查止损条件
+                    # 检查止损条件 - 确保比较逻辑正确
                     elif profit_pct <= stop_loss:
                         print(
                             f"🔔 主动监控: {symbol} {position_side} 达到止损条件 ({profit_pct:.2%} <= {stop_loss:.2%})")
@@ -159,13 +167,9 @@ class EnhancedTradingBot:
                                 "entry_price": entry_price,
                                 "exit_price": current_price
                             })
-                        else:
-                            print(f"❌ {symbol} {position_side} 止损平仓失败")
 
                 # 等待下一次检查
                 time.sleep(check_interval)
-        except KeyboardInterrupt:
-            print("主动持仓监控已停止")
         except Exception as e:
             print(f"主动持仓监控发生错误: {e}")
             self.logger.error(f"主动持仓监控错误", extra={"error": str(e)})
@@ -198,6 +202,45 @@ class EnhancedTradingBot:
 
         return order_amount
 
+    def check_and_reconnect_api(self):
+        """检查API连接并在必要时重新连接"""
+        try:
+            # 简单测试API连接
+            self.client.ping()
+            print("✅ API连接检查: 连接正常")
+            return True
+        except Exception as e:
+            print(f"⚠️ API连接检查失败: {e}")
+            self.logger.warning(f"API连接失败，尝试重新连接", extra={"error": str(e)})
+
+            # 重试计数
+            retry_count = 3
+            reconnected = False
+
+            for attempt in range(retry_count):
+                try:
+                    print(f"🔄 尝试重新连接API (尝试 {attempt + 1}/{retry_count})...")
+                    # 重新创建客户端
+                    self.client = Client(self.api_key, self.api_secret)
+
+                    # 验证连接
+                    self.client.ping()
+
+                    print("✅ API重新连接成功")
+                    self.logger.info("API重新连接成功")
+                    reconnected = True
+                    break
+                except Exception as reconnect_error:
+                    print(f"❌ 第{attempt + 1}次重连失败: {reconnect_error}")
+                    time.sleep(5 * (attempt + 1))  # 指数退避
+
+            if not reconnected:
+                print("❌ 所有重连尝试失败，将在下一个周期重试")
+                self.logger.error("API重连失败", extra={"attempts": retry_count})
+                return False
+
+            return reconnected
+
     def trade(self):
         """增强版多时框架集成交易循环，包含主动持仓监控"""
         import threading
@@ -210,12 +253,28 @@ class EnhancedTradingBot:
         monitor_thread.start()
         print("✅ 主动持仓监控已在后台启动（每15秒检查一次）")
 
+        # 初始化API连接
+        self.check_and_reconnect_api()
+
         while True:
             try:
                 self.trade_cycle += 1
                 print(f"\n======== 交易循环 #{self.trade_cycle} ========")
                 current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 print(f"当前时间: {current_time}")
+
+                # 每10个周期运行资源管理和API检查
+                if self.trade_cycle % 10 == 0:
+                    self.manage_resources()
+                    self.check_and_reconnect_api()
+
+                # 每5个周期分析一次市场条件
+                if self.trade_cycle % 5 == 0:
+                    print("\n----- 分析市场条件 -----")
+                    market_conditions = self.adapt_to_market_conditions()
+                    market_bias = market_conditions['market_bias']
+                    print(
+                        f"市场分析完成: {'看涨' if market_bias == 'bullish' else '看跌' if market_bias == 'bearish' else '中性'} 偏向")
 
                 # 获取账户余额
                 account_balance = self.get_futures_balance()
@@ -233,12 +292,12 @@ class EnhancedTradingBot:
                 # 管理现有持仓
                 self.manage_open_positions()
 
-                # 分析所有交易对并生成建议
+                # 分析交易对并生成建议
                 trade_candidates = []
                 for symbol in self.config["TRADE_PAIRS"]:
                     try:
                         print(f"\n分析交易对: {symbol}")
-                        # 获取历史数据
+                        # 获取基础数据
                         df = self.get_historical_data_with_cache(symbol, force_refresh=True)
                         if df is None:
                             print(f"❌ 无法获取{symbol}数据")
@@ -421,6 +480,197 @@ class EnhancedTradingBot:
 
         return False
 
+    def adapt_to_market_conditions(self):
+        """根据市场条件动态调整交易参数 - 改进版"""
+        print("\n===== 市场条件分析与参数适配 =====")
+
+        # 测试API是否能访问BTC数据
+        try:
+            ticker = self.client.futures_symbol_ticker(symbol="BTCUSDT")
+            print(f"✅ BTC当前价格: {ticker['price']}")
+        except Exception as e:
+            print(f"❌ 无法获取BTC价格: {e}")
+
+        # 分析当前市场波动性
+        volatility_levels = {}
+        trend_strengths = {}
+        btc_price_change = None
+
+        # 获取BTC数据作为整体市场情绪参考
+        btc_df = self.get_btc_data()  # 使用专门的BTC数据获取函数
+        if btc_df is not None and 'close' in btc_df.columns and len(btc_df) > 20:
+            btc_current = btc_df['close'].iloc[-1]
+            btc_prev = btc_df['close'].iloc[-13]  # 约1小时前
+            btc_price_change = (btc_current - btc_prev) / btc_prev * 100
+
+            print(f"📊 BTC 1小时变化率: {btc_price_change:.2f}%")
+        else:
+            # 如果无法获取BTC数据，尝试使用ETH数据替代
+            try:
+                eth_df = self.get_historical_data_with_cache("ETHUSDT", force_refresh=True)
+                if eth_df is not None and 'close' in eth_df.columns and len(eth_df) > 20:
+                    eth_current = eth_df['close'].iloc[-1]
+                    eth_prev = eth_df['close'].iloc[-13]  # 约1小时前
+                    eth_price_change = (eth_current - eth_prev) / eth_prev * 100
+
+                    print(f"📊 ETH 1小时变化率: {eth_price_change:.2f}% (BTC数据不可用，使用ETH替代)")
+                    btc_price_change = eth_price_change  # 使用ETH的变化率代替BTC
+                else:
+                    print(f"⚠️ BTC和ETH数据均不可用，将使用其他指标分析市场情绪")
+            except Exception as e:
+                print(f"⚠️ 获取ETH数据出错: {e}")
+
+        # 计算总体市场情绪分数
+        market_sentiment_score = 0.0
+        sentiment_factors = 0
+
+        # 分析各交易对的波动性和趋势强度
+        for symbol in self.config["TRADE_PAIRS"]:
+            df = self.get_historical_data_with_cache(symbol, force_refresh=True)
+            if df is not None and 'close' in df.columns and len(df) > 20:
+                # 计算波动性（当前ATR相对于历史的比率）
+                if 'ATR' in df.columns:
+                    current_atr = df['ATR'].iloc[-1]
+                    avg_atr = df['ATR'].rolling(20).mean().iloc[-1]
+                    volatility_ratio = current_atr / avg_atr if avg_atr > 0 else 1.0
+                    volatility_levels[symbol] = volatility_ratio
+
+                    # 检查趋势强度
+                    if 'ADX' in df.columns:
+                        adx = df['ADX'].iloc[-1]
+                        trend_strengths[symbol] = adx
+
+                # 计算1小时价格变化
+                if len(df) >= 13:  # 确保有足够数据
+                    recent_change = (df['close'].iloc[-1] - df['close'].iloc[-13]) / df['close'].iloc[-13] * 100
+
+                    # 用各交易对的价格变化贡献市场情绪分数
+                    market_sentiment_score += recent_change
+                    sentiment_factors += 1
+
+        # 如果BTC/ETH数据可用，给予更高权重
+        if btc_price_change is not None:
+            market_sentiment_score += btc_price_change * 3  # BTC变化的权重是普通交易对的3倍
+            sentiment_factors += 3
+
+        # 计算平均市场情绪分数
+        if sentiment_factors > 0:
+            avg_market_sentiment = market_sentiment_score / sentiment_factors
+
+            # 根据得分确定市场情绪
+            if avg_market_sentiment > 1.5:
+                market_bias = "bullish"
+                print(f"📊 市场情绪: 看涨 ({avg_market_sentiment:.2f}%)")
+            elif avg_market_sentiment < -1.5:
+                market_bias = "bearish"
+                print(f"📊 市场情绪: 看跌 ({avg_market_sentiment:.2f}%)")
+            else:
+                market_bias = "neutral"
+                print(f"📊 市场情绪: 中性 ({avg_market_sentiment:.2f}%)")
+        else:
+            # 极少情况下，无法获取任何有效数据
+            market_bias = "neutral"
+            print(f"⚠️ 无法收集足够市场数据，默认中性情绪")
+
+        # 计算整体市场波动性
+        if volatility_levels:
+            avg_volatility = sum(volatility_levels.values()) / len(volatility_levels)
+            print(f"📈 平均市场波动性: {avg_volatility:.2f}x (1.0为正常水平)")
+
+            # 波动性高低排名
+            high_vol_pairs = sorted(volatility_levels.items(), key=lambda x: x[1], reverse=True)[:3]
+            low_vol_pairs = sorted(volatility_levels.items(), key=lambda x: x[1])[:3]
+
+            print("📊 高波动交易对:")
+            for sym, vol in high_vol_pairs:
+                print(f"  - {sym}: {vol:.2f}x")
+
+            print("📊 低波动交易对:")
+            for sym, vol in low_vol_pairs:
+                print(f"  - {sym}: {vol:.2f}x")
+        else:
+            avg_volatility = 1.0  # 默认值
+
+        # 计算整体趋势强度
+        if trend_strengths:
+            avg_trend_strength = sum(trend_strengths.values()) / len(trend_strengths)
+            print(f"📏 平均趋势强度(ADX): {avg_trend_strength:.2f} (>25为强趋势)")
+
+            # 趋势强度排名
+            strong_trend_pairs = sorted(trend_strengths.items(), key=lambda x: x[1], reverse=True)[:3]
+            weak_trend_pairs = sorted(trend_strengths.items(), key=lambda x: x[1])[:3]
+
+            print("📊 强趋势交易对:")
+            for sym, adx in strong_trend_pairs:
+                print(f"  - {sym}: ADX {adx:.2f}")
+        else:
+            avg_trend_strength = 20.0  # 默认值
+
+        # 根据市场条件调整交易参数
+        # 1. 波动性调整
+        if avg_volatility > 1.5:  # 市场波动性高于平均50%
+            # 高波动环境
+            self.dynamic_take_profit = 0.035  # 提高止盈到3.5%
+            self.dynamic_stop_loss = -0.020  # 加大止损到2.0%
+            print(f"⚠️ 市场波动性较高，调整止盈至3.5%，止损至2.0%")
+
+            # 记录调整
+            self.logger.info("市场波动性高，调整交易参数", extra={
+                "volatility": avg_volatility,
+                "take_profit": self.dynamic_take_profit,
+                "stop_loss": self.dynamic_stop_loss
+            })
+        elif avg_volatility < 0.7:  # 市场波动性低于平均30%
+            # 低波动环境
+            self.dynamic_take_profit = 0.020  # 降低止盈到2.0%
+            self.dynamic_stop_loss = -0.015  # 缩小止损到1.5%
+            print(f"ℹ️ 市场波动性较低，调整止盈至2.0%，止损至1.5%")
+
+            # 记录调整
+            self.logger.info("市场波动性低，调整交易参数", extra={
+                "volatility": avg_volatility,
+                "take_profit": self.dynamic_take_profit,
+                "stop_loss": self.dynamic_stop_loss
+            })
+        else:
+            # 正常波动环境，恢复默认值
+            self.dynamic_take_profit = 0.025  # 恢复默认2.5%
+            self.dynamic_stop_loss = -0.0175  # 恢复默认1.75%
+            print(f"ℹ️ 市场波动性正常，使用默认止盈止损")
+
+            # 记录使用默认值
+            self.logger.info("市场波动性正常，使用默认参数", extra={
+                "volatility": avg_volatility,
+                "take_profit": self.dynamic_take_profit,
+                "stop_loss": self.dynamic_stop_loss
+            })
+
+        # 2. 市场情绪调整
+        self.market_bias = market_bias
+
+        # 3. 趋势强度调整
+        if 'avg_trend_strength' in locals():
+            if avg_trend_strength > 30:  # 强趋势市场
+                print(f"🔍 强趋势市场(ADX={avg_trend_strength:.2f})，优先选择趋势明确的交易对")
+                self.trend_priority = True
+
+                # 可以记录强趋势的交易对，优先考虑
+                self.strong_trend_symbols = [sym for sym, adx in trend_strengths.items() if adx > 25]
+                if self.strong_trend_symbols:
+                    print(f"💡 趋势明确的优先交易对: {', '.join(self.strong_trend_symbols)}")
+            else:
+                print(f"🔍 弱趋势或震荡市场(ADX={avg_trend_strength:.2f})，关注支撑阻力")
+                self.trend_priority = False
+                self.strong_trend_symbols = []
+
+        return {
+            "volatility": avg_volatility if 'avg_volatility' in locals() else 1.0,
+            "trend_strength": avg_trend_strength if 'avg_trend_strength' in locals() else 20.0,
+            "btc_change": btc_price_change,
+            "take_profit": self.dynamic_take_profit,
+            "stop_loss": self.dynamic_stop_loss,
+            "market_bias": self.market_bias
+        }
 
     def is_near_support(self, price, swing_lows, fib_levels, threshold=0.01):
         """检查价格是否接近支撑位"""
@@ -502,15 +752,20 @@ class EnhancedTradingBot:
             return 0.0
 
     def get_historical_data_with_cache(self, symbol, interval="15m", limit=200, force_refresh=False):
-        """获取历史数据，使用缓存减少API调用"""
+        """获取历史数据，使用缓存减少API调用 - 改进版"""
         cache_key = f"{symbol}_{interval}_{limit}"
         current_time = time.time()
 
+        # 更频繁刷新缓存 - 减少到5分钟
+        cache_ttl = 300  # 5分钟
+
+        # 对于长时间运行的会话，每小时强制刷新一次
+        hourly_force_refresh = self.trade_cycle % 12 == 0  # 假设每5分钟一个周期
+
         # 检查缓存是否存在且有效
-        if not force_refresh and cache_key in self.historical_data_cache:
+        if not force_refresh and not hourly_force_refresh and cache_key in self.historical_data_cache:
             cache_item = self.historical_data_cache[cache_key]
-            # 缓存保留10分钟
-            if current_time - cache_item['timestamp'] < 600:
+            if current_time - cache_item['timestamp'] < cache_ttl:
                 self.logger.info(f"使用缓存数据: {symbol}")
                 return cache_item['data']
 
@@ -582,8 +837,61 @@ class EnhancedTradingBot:
             self.logger.error(f"{symbol}价格预测失败: {e}")
             return None
 
+    def manage_resources(self):
+        """定期管理和清理资源，防止内存泄漏"""
+        # 启动时间
+        if not hasattr(self, 'resource_management_start_time'):
+            self.resource_management_start_time = time.time()
+            return
+
+        # 当前内存使用统计
+        import psutil
+        process = psutil.Process(os.getpid())
+        memory_usage = process.memory_info().rss / 1024 / 1024  # 转换为MB
+
+        # 日志记录内存使用
+        print(f"ℹ️ 当前内存使用: {memory_usage:.2f} MB")
+        self.logger.info(f"内存使用情况", extra={"memory_mb": memory_usage})
+
+        # 限制缓存大小
+        if len(self.historical_data_cache) > 50:
+            # 删除最老的缓存
+            oldest_keys = sorted(
+                self.historical_data_cache.keys(),
+                key=lambda k: self.historical_data_cache[k]['timestamp']
+            )[:10]
+
+            for key in oldest_keys:
+                del self.historical_data_cache[key]
+
+            print(f"🧹 清理了{len(oldest_keys)}个历史数据缓存项")
+            self.logger.info(f"清理历史数据缓存", extra={"cleaned_items": len(oldest_keys)})
+
+        # 限制持仓历史记录大小
+        if hasattr(self, 'position_history') and len(self.position_history) > 1000:
+            self.position_history = self.position_history[-1000:]
+            self._save_position_history()
+            print(f"🧹 持仓历史记录裁剪至1000条")
+            self.logger.info(f"裁剪持仓历史记录", extra={"max_records": 1000})
+
+        # 重置一些累积的统计数据
+        if self.trade_cycle % 100 == 0:
+            self.quality_score_history = {}
+            self.similar_patterns_history = {}
+            print(f"🔄 重置质量评分历史和相似模式历史")
+            self.logger.info(f"重置累积统计数据")
+
+        # 运行垃圾回收
+        import gc
+        collected = gc.collect()
+        print(f"♻️ 垃圾回收完成，释放了{collected}个对象")
+
+        # 计算运行时间
+        run_hours = (time.time() - self.resource_management_start_time) / 3600
+        print(f"⏱️ 机器人已运行: {run_hours:.2f}小时")
+
     def generate_trade_signal(self, df, symbol):
-        """生成更积极的交易信号，降低了预期变动和质量评分阈值"""
+        """生成更积极的交易信号，考虑市场偏向和趋势优先"""
 
         if df is None or len(df) < 20:
             return "HOLD", 0
@@ -608,6 +916,28 @@ class EnhancedTradingBot:
             print_colored(f"  一致性级别: {coherence.get('agreement_level', '未知')}", Colors.INFO)
             print_colored(f"  主导趋势: {coherence.get('dominant_trend', '未知')}", Colors.INFO)
             print_colored(f"  推荐: {coherence.get('recommendation', '未知')}", Colors.INFO)
+
+            # 考虑市场偏向
+            if hasattr(self, 'market_bias') and self.market_bias != "neutral":
+                if self.market_bias == "bullish" and "SELL" not in signal:
+                    # 在看涨偏向下增强买入信号
+                    adjusted_score += 0.5
+                    print_colored(f"📈 市场看涨偏向，增强买入信号: +0.5分", Colors.GREEN)
+                elif self.market_bias == "bearish" and "BUY" not in signal:
+                    # 在看跌偏向下增强卖出信号
+                    adjusted_score -= 0.5
+                    print_colored(f"📉 市场看跌偏向，增强卖出信号: -0.5分", Colors.RED)
+
+            # 考虑趋势优先
+            if hasattr(self, 'trend_priority') and self.trend_priority and hasattr(self, 'strong_trend_symbols'):
+                if symbol in self.strong_trend_symbols:
+                    trend_direction = coherence.get('dominant_trend', 'NEUTRAL')
+                    if trend_direction == "UP":
+                        adjusted_score += 0.7
+                        print_colored(f"⭐ {symbol}是强上升趋势交易对，提高买入评分: +0.7分", Colors.GREEN)
+                    elif trend_direction == "DOWN":
+                        adjusted_score -= 0.7
+                        print_colored(f"⭐ {symbol}是强下降趋势交易对，降低买入评分: -0.7分", Colors.RED)
 
             # 获取当前价格
             try:
@@ -654,6 +984,12 @@ class EnhancedTradingBot:
                     print_colored(f"为 PAXGUSDT 生成特殊 SELL 信号", Colors.RED)
             else:
                 final_signal = "HOLD"
+
+            # 动态止盈止损考虑
+            if hasattr(self, 'dynamic_take_profit') and hasattr(self, 'dynamic_stop_loss'):
+                print_colored(
+                    f"{symbol} 当前止盈设置: {self.dynamic_take_profit * 100:.2f}%, 止损设置: {abs(self.dynamic_stop_loss) * 100:.2f}%",
+                    Colors.CYAN)
 
             print_colored(f"{symbol} 最终信号: {final_signal}, 评分: {adjusted_score:.2f}", Colors.INFO)
             return final_signal, adjusted_score
@@ -985,140 +1321,93 @@ class EnhancedTradingBot:
             Colors.GREEN + Colors.BOLD)
 
     def close_position(self, symbol, position_side=None):
-        """平仓指定货币对的持仓，并记录历史
-
-        参数:
-            symbol: 交易对符号
-            position_side: 持仓方向 ('LONG' 或 'SHORT')，不指定则平仓所有方向
-
-        返回:
-            (success, closed_positions): 平仓是否成功及平仓的持仓列表
-        """
-        closed_positions = []
-        success = False  # 初始化 success 变量
-
+        """平仓指定货币对的持仓，并记录历史"""
         try:
-            # 首先检查本地持仓信息
-            positions = []
+            # 查找匹配的持仓
+            positions_to_close = []
             for pos in self.open_positions:
                 if pos["symbol"] == symbol:
                     if position_side is None or pos.get("position_side", "LONG") == position_side:
-                        positions.append(pos)
+                        positions_to_close.append(pos)
 
-            if not positions:
+            if not positions_to_close:
                 print(f"⚠️ 未找到 {symbol} {position_side or '任意方向'} 的持仓")
-                self.logger.warning(f"未找到持仓", extra={"symbol": symbol, "position_side": position_side})
                 return False, []
 
-            # 平仓每个匹配的持仓
-            for pos in positions:
-                side = "SELL" if pos.get("position_side", "LONG") == "LONG" else "BUY"
-                quantity = pos["quantity"]
-                close_success = False
+            closed_positions = []
+            success = False
 
-                print(f"📉 平仓 {symbol} {pos.get('position_side', 'LONG')}, 数量: {quantity}")
+            for pos in positions_to_close:
+                pos_side = pos.get("position_side", "LONG")
+                quantity = pos["quantity"]
+
+                # 平仓方向
+                close_side = "SELL" if pos_side == "LONG" else "BUY"
+
+                print(f"📉 平仓 {symbol} {pos_side}, 数量: {quantity}")
 
                 try:
-                    # 处理数量格式化
-                    try:
-                        # 优先使用format_quantity函数如果存在
-                        if hasattr(self, 'format_quantity'):
-                            formatted_qty = self.format_quantity(symbol, quantity)
-                        else:
-                            # 备用格式化方法
-                            precision = 3  # 默认精度
-                            formatted_qty = str(round(float(quantity), precision))
-                            # 确保不使用科学计数法
-                            if 'e' in formatted_qty.lower():
-                                formatted_qty = f"{float(quantity):.8f}".rstrip('0').rstrip('.')
-                    except Exception as e:
-                        print(f"⚠️ 数量格式化失败: {e}, 尝试直接使用原始数量")
-                        formatted_qty = str(quantity)  # 直接使用原始数量的字符串形式
+                    # 获取精确数量
+                    info = self.client.futures_exchange_info()
+                    step_size = None
 
-                    print(f"📊 使用格式化数量: {formatted_qty}")
+                    for item in info['symbols']:
+                        if item['symbol'] == symbol:
+                            for f in item['filters']:
+                                if f['filterType'] == 'LOT_SIZE':
+                                    step_size = float(f['stepSize'])
+                                    break
+                            break
 
-                    # 使用市价单平仓
+                    if step_size:
+                        precision = int(round(-math.log(step_size, 10), 0))
+                        formatted_qty = f"{quantity:.{precision}f}"
+                    else:
+                        formatted_qty = str(quantity)
+
+                    # 执行平仓订单
                     if hasattr(self, 'hedge_mode_enabled') and self.hedge_mode_enabled:
-                        # 双向持仓模式
                         order = self.client.futures_create_order(
                             symbol=symbol,
-                            side=side,
+                            side=close_side,
                             type="MARKET",
                             quantity=formatted_qty,
-                            positionSide=pos.get("position_side", "LONG")
+                            positionSide=pos_side
                         )
                     else:
-                        # 单向持仓模式
                         order = self.client.futures_create_order(
                             symbol=symbol,
-                            side=side,
+                            side=close_side,
                             type="MARKET",
                             quantity=formatted_qty,
                             reduceOnly=True
                         )
 
-                    # 平仓成功
-                    close_success = True
-                    closed_positions.append(pos)
-
-                    # 记录平仓信息
-                    self.logger.info(f"{symbol} {pos.get('position_side', 'LONG')} 平仓成功", extra={
-                        "quantity": quantity,
-                        "exit_side": side,
-                        "order_id": order.get("orderId", "unknown")
-                    })
-
-                    # 计算持仓时间
-                    entry_time = pos.get("open_time", time.time() - 3600)
-                    holding_hours = (time.time() - entry_time) / 3600
-
-                    # 获取当前价格作为平仓价格
-                    try:
-                        ticker = self.client.futures_symbol_ticker(symbol=symbol)
-                        exit_price = float(ticker['price'])
-                    except Exception as e:
-                        print(f"⚠️ 获取退出价格失败: {e}")
-                        exit_price = pos.get("entry_price", 0)  # 默认值
+                    # 获取平仓价格
+                    ticker = self.client.futures_symbol_ticker(symbol=symbol)
+                    exit_price = float(ticker['price'])
 
                     # 计算盈亏
-                    entry_price = pos.get("entry_price", 0)
-                    if pos.get("position_side", "LONG") == "LONG":
+                    entry_price = pos["entry_price"]
+                    if pos_side == "LONG":
                         profit_pct = (exit_price - entry_price) / entry_price * 100
                     else:
                         profit_pct = (entry_price - exit_price) / entry_price * 100
 
-                    # 记录完整的持仓历史
-                    if hasattr(self, 'position_history'):
-                        history_record = {
-                            "symbol": symbol,
-                            "position_side": pos.get("position_side", "LONG"),
-                            "entry_price": entry_price,
-                            "exit_price": exit_price,
-                            "quantity": quantity,
-                            "open_time": entry_time,
-                            "close_time": time.time(),
-                            "holding_time": holding_hours,
-                            "profit_pct": profit_pct,
-                            "take_profit": pos.get("dynamic_take_profit", 0.025),
-                            "stop_loss": pos.get("stop_loss", -0.0175),
-                            "close_reason": "take_profit" if profit_pct > 0 else "stop_loss"
-                        }
+                    # 记录平仓成功
+                    closed_positions.append(pos)
+                    success = True
 
-                        # 添加到历史记录
-                        self.position_history.append(history_record)
-                        print(f"📝 记录交易历史: {symbol} {pos.get('position_side', 'LONG')} 盈亏: {profit_pct:.2f}%")
-
-                        # 保存到文件
-                        if hasattr(self, '_save_position_history'):
-                            self._save_position_history()
+                    print(f"✅ {symbol} {pos_side} 平仓成功，盈亏: {profit_pct:.2f}%")
+                    self.logger.info(f"{symbol} {pos_side} 平仓成功", extra={
+                        "profit_pct": profit_pct,
+                        "entry_price": entry_price,
+                        "exit_price": exit_price
+                    })
 
                 except Exception as e:
-                    print(f"❌ {symbol} {pos.get('position_side', 'LONG')} 平仓失败: {e}")
+                    print(f"❌ {symbol} {pos_side} 平仓失败: {e}")
                     self.logger.error(f"{symbol} 平仓失败", extra={"error": str(e)})
-                    close_success = False
-
-            # 如果有任何一个持仓平仓成功，就认为整体成功
-            success = any(pos in closed_positions for pos in positions)
 
             # 从本地持仓列表中移除已平仓的持仓
             for pos in closed_positions:
@@ -1144,29 +1433,12 @@ class EnhancedTradingBot:
             return
 
         current_time = time.time()
-        account_balance = self.get_futures_balance()
-
-        # 更新持仓状态 - 固定止盈止损比例
-        updated_positions = []
-
-        for pos in self.open_positions:
-            # 为所有持仓应用固定的止盈止损比例
-            pos["dynamic_take_profit"] = 0.025  # 固定2.5%止盈
-            pos["stop_loss"] = -0.0175  # 固定1.75%止损
-            updated_positions.append(pos)
-
-        self.open_positions = updated_positions
-
-        # 检查每个持仓的止盈止损条件
         positions_to_remove = []  # 记录需要移除的持仓
 
         for pos in self.open_positions:
             symbol = pos["symbol"]
-            side = pos.get("side", "BUY")
             position_side = pos.get("position_side", "LONG")
             entry_price = pos["entry_price"]
-            quantity = pos["quantity"]
-            holding_time = (current_time - pos["open_time"]) / 3600  # 小时
 
             # 获取当前价格
             try:
@@ -1176,19 +1448,19 @@ class EnhancedTradingBot:
                 print(f"⚠️ 无法获取 {symbol} 当前价格: {e}")
                 continue
 
-            # 计算盈亏
-            if position_side == "LONG" or side == "BUY":
+            # 计算盈亏百分比
+            if position_side == "LONG":
                 profit_pct = (current_price - entry_price) / entry_price
-            else:
+            else:  # SHORT
                 profit_pct = (entry_price - current_price) / entry_price
 
-            # 获取固定的止盈止损比例
-            take_profit = pos.get("dynamic_take_profit", 0.025)  # 2.5%
-            stop_loss = pos.get("stop_loss", -0.0175)  # -1.75%
+            # 使用固定的止盈止损比例
+            take_profit = self.dynamic_take_profit  # 动态止盈值
+            stop_loss = self.dynamic_stop_loss  # 动态止损值
 
             profit_color = Colors.GREEN if profit_pct >= 0 else Colors.RED
             print(
-                f"{symbol} {position_side}: 持仓 {holding_time:.2f}小时, 当前盈亏 {profit_color}{profit_pct:.2%}{Colors.RESET}, "
+                f"{symbol} {position_side}: 当前盈亏 {profit_color}{profit_pct:.2%}{Colors.RESET}, "
                 f"止盈线 {take_profit:.2%}, 止损线 {stop_loss:.2%}"
             )
 
@@ -1205,10 +1477,8 @@ class EnhancedTradingBot:
                         "entry_price": entry_price,
                         "exit_price": current_price
                     })
-                else:
-                    print(f"❌ {symbol} {position_side} 止盈平仓失败")
 
-            # 检查是否达到止损条件
+            # 检查是否达到止损条件 - 确保绝对值比较
             elif profit_pct <= stop_loss:
                 print(f"🔔 {symbol} {position_side} 达到止损条件 ({profit_pct:.2%} <= {stop_loss:.2%})，执行平仓...")
                 success, closed = self.close_position(symbol, position_side)
@@ -1221,24 +1491,6 @@ class EnhancedTradingBot:
                         "entry_price": entry_price,
                         "exit_price": current_price
                     })
-                else:
-                    print(f"❌ {symbol} {position_side} 止损平仓失败")
-
-            # 检查持仓时间是否过长 (超过24小时)
-            elif holding_time > 24:
-                print(f"🔔 {symbol} {position_side} 持仓时间过长 ({holding_time:.2f}小时 > 24小时)，执行平仓...")
-                success, closed = self.close_position(symbol, position_side)
-                if success:
-                    print(f"✅ {symbol} {position_side} 时间止损平仓成功!")
-                    positions_to_remove.append(pos)
-                    self.logger.info(f"{symbol} {position_side}时间止损平仓", extra={
-                        "holding_time": holding_time,
-                        "profit_pct": profit_pct,
-                        "entry_price": entry_price,
-                        "exit_price": current_price
-                    })
-                else:
-                    print(f"❌ {symbol} {position_side} 时间止损平仓失败")
 
         # 从持仓列表中移除已平仓的持仓
         for pos in positions_to_remove:
@@ -1247,9 +1499,6 @@ class EnhancedTradingBot:
 
         # 重新加载持仓以确保数据最新
         self.load_existing_positions()
-
-        # 显示持仓状态
-        self.display_positions_status()
 
     def display_positions_status(self):
         """显示所有持仓的状态"""
@@ -1294,6 +1543,34 @@ class EnhancedTradingBot:
     def load_existing_positions(self):
         """加载现有持仓"""
         self.open_positions = load_positions(self.client, self.logger)
+
+    def execute_with_retry(self, func, *args, max_retries=3, **kwargs):
+        """执行函数并在失败时自动重试"""
+        for attempt in range(max_retries):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    sleep_time = 2 ** attempt  # 指数退避
+                    print(f"操作失败，{sleep_time}秒后重试: {e}")
+                    time.sleep(sleep_time)
+                else:
+                    print(f"操作失败，已达到最大重试次数: {e}")
+                    raise
+
+    def check_api_connection(self):
+        """检查API连接状态"""
+        try:
+            account_info = self.client.futures_account()
+            if "totalMarginBalance" in account_info:
+                print("✅ API连接正常")
+                return True
+            else:
+                print("❌ API连接异常: 返回数据格式不正确")
+                return False
+        except Exception as e:
+            print(f"❌ API连接异常: {e}")
+            return False
 
     def display_position_sell_timing(self):
         """显示持仓的预期卖出时机"""
@@ -1728,6 +2005,129 @@ def show_statistics(self):
     print(f"详细报告: {report_file}")
 
 
+def check_all_positions_status(self):
+    """检查所有持仓状态，确认是否有任何持仓达到止盈止损条件"""
+    self.load_existing_positions()
+
+    if not self.open_positions:
+        print("当前无持仓，状态检查完成")
+        return
+
+    print("\n===== 持仓状态检查 =====")
+    positions_requiring_action = []
+
+    for pos in self.open_positions:
+        symbol = pos["symbol"]
+        position_side = pos.get("position_side", "LONG")
+        entry_price = pos["entry_price"]
+        open_time = datetime.datetime.fromtimestamp(pos["open_time"]).strftime("%Y-%m-%d %H:%M:%S")
+
+        try:
+            # 获取当前价格
+            ticker = self.client.futures_symbol_ticker(symbol=symbol)
+            current_price = float(ticker['price'])
+
+            # 计算盈亏
+            if position_side == "LONG":
+                profit_pct = (current_price - entry_price) / entry_price
+            else:
+                profit_pct = (entry_price - current_price) / entry_price
+
+            # 标准止盈止损值
+            take_profit = 0.025
+            stop_loss = -0.0175
+
+            status = "正常"
+            action_needed = False
+
+            if profit_pct >= take_profit:
+                status = "⚠️ 已达到止盈条件"
+                action_needed = True
+            elif profit_pct <= stop_loss:
+                status = "⚠️ 已达到止损条件"
+                action_needed = True
+
+            holding_time = (time.time() - pos["open_time"]) / 3600
+
+            print(f"{symbol} {position_side}: 开仓于 {open_time}, 持仓 {holding_time:.2f}小时")
+            print(f"  入场价: {entry_price:.6f}, 当前价: {current_price:.6f}, 盈亏: {profit_pct:.2%}")
+            print(f"  状态: {status}")
+
+            if action_needed:
+                positions_requiring_action.append((symbol, position_side, status))
+
+        except Exception as e:
+            print(f"检查 {symbol} 状态时出错: {e}")
+
+    if positions_requiring_action:
+        print("\n需要处理的持仓:")
+        for symbol, side, status in positions_requiring_action:
+            print(f"- {symbol} {side}: {status}")
+    else:
+        print("\n所有持仓状态正常，没有达到止盈止损条件")
+
+
+def get_btc_data(self):
+    """专门获取BTC数据的方法"""
+    try:
+        # 直接从API获取最新数据，完全绕过缓存
+        print("正在直接从API获取BTC数据...")
+
+        # 尝试不同的交易对名称
+        btc_symbols = ["BTCUSDT", "BTCUSDC"]
+
+        for symbol in btc_symbols:
+            try:
+                # 直接调用client.futures_klines而不是get_historical_data
+                klines = self.client.futures_klines(
+                    symbol=symbol,
+                    interval="15m",
+                    limit=30  # 获取足够多的数据点
+                )
+
+                if klines and len(klines) > 20:
+                    print(f"✅ 成功获取{symbol}数据: {len(klines)}行")
+
+                    # 转换为DataFrame
+                    df = pd.DataFrame(klines, columns=[
+                        'time', 'open', 'high', 'low', 'close', 'volume',
+                        'close_time', 'quote_asset_volume', 'trades',
+                        'taker_base_vol', 'taker_quote_vol', 'ignore'
+                    ])
+
+                    # 转换数据类型
+                    for col in ['open', 'high', 'low', 'close', 'volume']:
+                        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
+
+                    # 转换时间
+                    df['time'] = pd.to_datetime(df['time'], unit='ms', errors='coerce')
+
+                    print(f"BTC价格范围: {df['close'].min():.2f} - {df['close'].max():.2f}")
+                    return df
+                else:
+                    print(f"⚠️ {symbol}数据不足或为空")
+            except Exception as e:
+                print(f"⚠️ 获取{symbol}数据失败: {e}")
+                continue
+
+        # 如果所有交易对都失败，打印更多调试信息
+        print("🔍 正在尝试获取可用的交易对列表...")
+        try:
+            # 获取可用的交易对列表
+            exchange_info = self.client.futures_exchange_info()
+            available_symbols = [info['symbol'] for info in exchange_info['symbols']]
+            btc_symbols = [sym for sym in available_symbols if 'BTC' in sym]
+            print(f"发现BTC相关交易对: {btc_symbols[:5]}...")
+        except Exception as e:
+            print(f"获取交易对列表失败: {e}")
+
+        print("❌ 所有尝试获取BTC数据的方法都失败了")
+        return None
+
+    except Exception as e:
+        print(f"❌ 获取BTC数据出错: {e}")
+        return None
+
 if __name__ == "__main__":
     import argparse
 
@@ -1735,8 +2135,8 @@ if __name__ == "__main__":
     parser.add_argument('--stats', action='store_true', help='生成交易统计报告')
     args = parser.parse_args()
 
-    API_KEY = "lnfs30CvqF8cCIdRcIfW6kKnGGpLoRzTUrwdRslTX4e7a0O6OJ3SYsUT6gF1B26W"
-    API_SECRET = "llSlxBLrrxh21ugMzli5x6NveNrwQyLBI7YEgTR4VOMyTmVP6V9uqmrN90hX10cn"
+    API_KEY = "mcTvvqngLrgJ07EBHun9Q8NHgFXxAEKwnQY22tPfYiVFDF25i0oBOxUklJ7yh9LU"
+    API_SECRET = "O3c1cSnw7GH4w7JgXMgIyPkiBDxvXbKfKH5Ti6oXKA1TBlUrHJV1T90Vgv8e6mwi"
 
     bot = EnhancedTradingBot(API_KEY, API_SECRET, CONFIG)
 
