@@ -93,86 +93,84 @@ class EnhancedTradingBot:
 
         print(f"初始化完成，交易对: {self.config['TRADE_PAIRS']}")
 
-    def active_position_monitor(self, check_interval=15):
-        """
-        主动监控持仓，确保及时执行止盈止损
-        """
-        print(f"🔄 启动主动持仓监控（每{check_interval}秒检查一次）")
 
-        try:
-            while True:
-                # 如果没有持仓，等待一段时间后再检查
-                if not self.open_positions:
-                    time.sleep(check_interval)
-                    continue
 
-                # 加载最新持仓
-                self.load_existing_positions()
+    def manage_open_positions(self):
+        """管理现有持仓，使用每个持仓的特定止盈止损设置"""
+        self.load_existing_positions()
 
-                # 当前持仓列表的副本，用于检查
-                positions = self.open_positions.copy()
+        if not self.open_positions:
+            self.logger.info("当前无持仓")
+            return
 
-                for pos in positions:
-                    symbol = pos["symbol"]
-                    position_side = pos.get("position_side", "LONG")
-                    entry_price = pos["entry_price"]
+        current_time = time.time()
+        positions_to_remove = []  # 记录需要移除的持仓
 
-                    # 获取当前价格
-                    try:
-                        ticker = self.client.futures_symbol_ticker(symbol=symbol)
-                        current_price = float(ticker['price'])
-                    except Exception as e:
-                        print(f"⚠️ 获取{symbol}价格失败: {e}")
-                        continue
+        for pos in self.open_positions:
+            symbol = pos["symbol"]
+            position_side = pos.get("position_side", "LONG")
+            entry_price = pos["entry_price"]
 
-                    # 计算利润百分比
-                    if position_side == "LONG":
-                        profit_pct = (current_price - entry_price) / entry_price
-                    else:  # SHORT
-                        profit_pct = (entry_price - current_price) / entry_price
+            # 获取当前价格
+            try:
+                ticker = self.client.futures_symbol_ticker(symbol=symbol)
+                current_price = float(ticker['price'])
+            except Exception as e:
+                print(f"⚠️ 无法获取 {symbol} 当前价格: {e}")
+                continue
 
-                    # 确保使用固定的止盈止损比例
-                    take_profit = 0.025  # 固定2.5%止盈
-                    stop_loss = -0.0175  # 固定1.75%止损
+            # 计算盈亏百分比
+            if position_side == "LONG":
+                profit_pct = (current_price - entry_price) / entry_price
+            else:  # SHORT
+                profit_pct = (entry_price - current_price) / entry_price
 
-                    # 日志记录当前状态
-                    if check_interval % 60 == 0:  # 每分钟记录一次
-                        print(
-                            f"{symbol} {position_side}: 盈亏 {profit_pct:.2%}, 止盈 {take_profit:.2%}, 止损 {stop_loss:.2%}")
+            # 使用持仓记录的个性化止盈止损设置，而不是全局默认值
+            take_profit = pos.get("dynamic_take_profit", 0.025)  # 使用持仓特定的止盈值，默认2.5%
+            stop_loss = pos.get("stop_loss", -0.0175)  # 使用持仓特定的止损值，默认-1.75%
 
-                    # 检查止盈条件
-                    if profit_pct >= take_profit:
-                        print(
-                            f"🔔 主动监控: {symbol} {position_side} 达到止盈条件 ({profit_pct:.2%} >= {take_profit:.2%})")
-                        success, closed = self.close_position(symbol, position_side)
-                        if success:
-                            print(f"✅ {symbol} {position_side} 止盈平仓成功: +{profit_pct:.2%}")
-                            self.logger.info(f"{symbol} {position_side}主动监控止盈平仓", extra={
-                                "profit_pct": profit_pct,
-                                "take_profit": take_profit,
-                                "entry_price": entry_price,
-                                "exit_price": current_price
-                            })
+            profit_color = Colors.GREEN if profit_pct >= 0 else Colors.RED
+            print(
+                f"{symbol} {position_side}: 当前盈亏 {profit_color}{profit_pct:.2%}{Colors.RESET}, "
+                f"止盈线 {take_profit:.2%}, 止损线 {stop_loss:.2%}"
+            )
 
-                    # 检查止损条件 - 确保比较逻辑正确
-                    elif profit_pct <= stop_loss:
-                        print(
-                            f"🔔 主动监控: {symbol} {position_side} 达到止损条件 ({profit_pct:.2%} <= {stop_loss:.2%})")
-                        success, closed = self.close_position(symbol, position_side)
-                        if success:
-                            print(f"✅ {symbol} {position_side} 止损平仓成功: {profit_pct:.2%}")
-                            self.logger.info(f"{symbol} {position_side}主动监控止损平仓", extra={
-                                "profit_pct": profit_pct,
-                                "stop_loss": stop_loss,
-                                "entry_price": entry_price,
-                                "exit_price": current_price
-                            })
+            # 检查是否达到止盈条件
+            if profit_pct >= take_profit:
+                print(f"🔔 {symbol} {position_side} 达到止盈条件 ({profit_pct:.2%} >= {take_profit:.2%})，执行平仓...")
+                success, closed = self.close_position(symbol, position_side)
+                if success:
+                    print(f"✅ {symbol} {position_side} 止盈平仓成功!")
+                    positions_to_remove.append(pos)
+                    self.logger.info(f"{symbol} {position_side}止盈平仓", extra={
+                        "profit_pct": profit_pct,
+                        "take_profit": take_profit,
+                        "entry_price": entry_price,
+                        "exit_price": current_price
+                    })
 
-                # 等待下一次检查
-                time.sleep(check_interval)
-        except Exception as e:
-            print(f"主动持仓监控发生错误: {e}")
-            self.logger.error(f"主动持仓监控错误", extra={"error": str(e)})
+            # 检查是否达到止损条件
+            elif profit_pct <= stop_loss:
+                print(f"🔔 {symbol} {position_side} 达到止损条件 ({profit_pct:.2%} <= {stop_loss:.2%})，执行平仓...")
+                success, closed = self.close_position(symbol, position_side)
+                if success:
+                    print(f"✅ {symbol} {position_side} 止损平仓成功!")
+                    positions_to_remove.append(pos)
+                    self.logger.info(f"{symbol} {position_side}止损平仓", extra={
+                        "profit_pct": profit_pct,
+                        "stop_loss": stop_loss,
+                        "entry_price": entry_price,
+                        "exit_price": current_price
+                    })
+
+        # 从持仓列表中移除已平仓的持仓
+        for pos in positions_to_remove:
+            if pos in self.open_positions:
+                self.open_positions.remove(pos)
+
+        # 重新加载持仓以确保数据最新
+        self.load_existing_positions()
+
 
     def calculate_dynamic_order_amount(self, risk, account_balance):
         """基于风险和账户余额计算适当的订单金额"""
@@ -240,6 +238,87 @@ class EnhancedTradingBot:
                 return False
 
             return reconnected
+
+    def active_position_monitor(self, check_interval=15):
+        """
+        主动监控持仓，确保及时执行止盈止损，支持动态止盈止损
+        """
+        print(f"🔄 启动主动持仓监控（每{check_interval}秒检查一次）")
+
+        try:
+            while True:
+                # 如果没有持仓，等待一段时间后再检查
+                if not self.open_positions:
+                    time.sleep(check_interval)
+                    continue
+
+                # 加载最新持仓
+                self.load_existing_positions()
+
+                # 当前持仓列表的副本，用于检查
+                positions = self.open_positions.copy()
+
+                for pos in positions:
+                    symbol = pos["symbol"]
+                    position_side = pos.get("position_side", "LONG")
+                    entry_price = pos["entry_price"]
+
+                    # 获取当前价格
+                    try:
+                        ticker = self.client.futures_symbol_ticker(symbol=symbol)
+                        current_price = float(ticker['price'])
+                    except Exception as e:
+                        print(f"⚠️ 获取{symbol}价格失败: {e}")
+                        continue
+
+                    # 计算利润百分比
+                    if position_side == "LONG":
+                        profit_pct = (current_price - entry_price) / entry_price
+                    else:  # SHORT
+                        profit_pct = (entry_price - current_price) / entry_price
+
+                    # 使用持仓特定的止盈止损设置，而不是全局默认值
+                    take_profit = pos.get("dynamic_take_profit", 0.025)  # 默认2.5%
+                    stop_loss = pos.get("stop_loss", -0.0175)  # 默认-1.75%
+
+                    # 日志记录当前状态
+                    if check_interval % 60 == 0:  # 每分钟记录一次
+                        print(
+                            f"{symbol} {position_side}: 盈亏 {profit_pct:.2%}, 止盈 {take_profit:.2%}, 止损 {stop_loss:.2%}")
+
+                    # 检查止盈条件
+                    if profit_pct >= take_profit:
+                        print(
+                            f"🔔 主动监控: {symbol} {position_side} 达到止盈条件 ({profit_pct:.2%} >= {take_profit:.2%})")
+                        success, closed = self.close_position(symbol, position_side)
+                        if success:
+                            print(f"✅ {symbol} {position_side} 止盈平仓成功: +{profit_pct:.2%}")
+                            self.logger.info(f"{symbol} {position_side}主动监控止盈平仓", extra={
+                                "profit_pct": profit_pct,
+                                "take_profit": take_profit,
+                                "entry_price": entry_price,
+                                "exit_price": current_price
+                            })
+
+                    # 检查止损条件
+                    elif profit_pct <= stop_loss:
+                        print(
+                            f"🔔 主动监控: {symbol} {position_side} 达到止损条件 ({profit_pct:.2%} <= {stop_loss:.2%})")
+                        success, closed = self.close_position(symbol, position_side)
+                        if success:
+                            print(f"✅ {symbol} {position_side} 止损平仓成功: {profit_pct:.2%}")
+                            self.logger.info(f"{symbol} {position_side}主动监控止损平仓", extra={
+                                "profit_pct": profit_pct,
+                                "stop_loss": stop_loss,
+                                "entry_price": entry_price,
+                                "exit_price": current_price
+                            })
+
+                # 等待下一次检查
+                time.sleep(check_interval)
+        except Exception as e:
+            print(f"主动持仓监控发生错误: {e}")
+            self.logger.error(f"主动持仓监控错误", extra={"error": str(e)})
 
     def trade(self):
         """增强版多时框架集成交易循环，包含主动持仓监控"""
@@ -481,7 +560,7 @@ class EnhancedTradingBot:
         return False
 
     def adapt_to_market_conditions(self):
-        """根据市场条件动态调整交易参数 - 简化版，完全不依赖BTC数据"""
+        """根据市场条件动态调整交易参数 - 改进版，增强健壮性"""
         print("\n===== 市场条件分析与参数适配 =====")
 
         # 分析当前市场波动性
@@ -489,9 +568,62 @@ class EnhancedTradingBot:
         trend_strengths = {}
         market_sentiment_score = 0.0
         sentiment_factors = 0
+        btc_price_change = None
 
-        # 完全不尝试获取BTC数据，直接使用交易对数据
-        print("📊 使用交易对组合数据分析市场情绪")
+        # 尝试获取BTC数据
+        btc_df = None
+        try:
+            # 首先尝试使用get_btc_data方法
+            btc_df = self.get_btc_data()
+
+            # 检查获取的数据是否有效
+            if btc_df is not None and 'close' in btc_df.columns and len(btc_df) > 20:
+                print("✅ 成功获取BTC数据")
+                btc_current = btc_df['close'].iloc[-1]
+                btc_prev = btc_df['close'].iloc[-13]  # 约1小时前
+                btc_price_change = (btc_current - btc_prev) / btc_prev * 100
+                print(f"📊 BTC 1小时变化率: {btc_price_change:.2f}%")
+            else:
+                print("⚠️ 获取的BTC数据无效或不完整")
+                btc_df = None
+        except Exception as e:
+            print(f"⚠️ 获取BTC数据时出错: {e}")
+            btc_df = None
+
+        # 如果无法获取BTC数据，尝试使用ETH或其他替代方法
+        if btc_df is None:
+            print("🔄 尝试替代方法获取市场情绪...")
+
+            # 尝试方法1: 直接使用futures_symbol_ticker获取BTC当前价格
+            try:
+                ticker_now = self.client.futures_symbol_ticker(symbol="BTCUSDT")
+                current_price = float(ticker_now['price'])
+
+                # 获取历史价格（通过klines获取单个数据点）
+                klines = self.client.futures_klines(symbol="BTCUSDT", interval="1h", limit=2)
+                if klines and len(klines) >= 2:
+                    prev_price = float(klines[0][4])  # 1小时前的收盘价
+                    btc_price_change = (current_price - prev_price) / prev_price * 100
+                    print(f"📊 BTC 1小时变化率(替代方法): {btc_price_change:.2f}%")
+                else:
+                    print("⚠️ 无法获取BTC历史数据，无法计算价格变化")
+            except Exception as e:
+                print(f"⚠️ 替代方法获取BTC数据失败: {e}")
+
+            # 尝试方法2: 使用ETH数据
+            if btc_price_change is None:
+                try:
+                    eth_df = self.get_historical_data_with_cache("ETHUSDT", force_refresh=True)
+                    if eth_df is not None and 'close' in eth_df.columns and len(eth_df) > 20:
+                        eth_current = eth_df['close'].iloc[-1]
+                        eth_prev = eth_df['close'].iloc[-13]  # 约1小时前
+                        eth_price_change = (eth_current - eth_prev) / eth_prev * 100
+                        print(f"📊 ETH 1小时变化率: {eth_price_change:.2f}% (BTC数据不可用，使用ETH替代)")
+                        btc_price_change = eth_price_change  # 使用ETH的变化率代替BTC
+                    else:
+                        print(f"⚠️ ETH数据不可用，将使用其他指标分析市场情绪")
+                except Exception as e:
+                    print(f"⚠️ 获取ETH数据出错: {e}")
 
         # 分析各交易对的波动性和趋势强度
         for symbol in self.config["TRADE_PAIRS"]:
@@ -515,6 +647,12 @@ class EnhancedTradingBot:
                     market_sentiment_score += recent_change
                     sentiment_factors += 1
                     print(f"📊 {symbol} 1小时变化率: {recent_change:.2f}%")
+
+        # 如果BTC/ETH数据可用，给予更高权重
+        if btc_price_change is not None:
+            market_sentiment_score += btc_price_change * 3  # BTC变化的权重是普通交易对的3倍
+            sentiment_factors += 3
+            print(f"赋予BTC变化率 {btc_price_change:.2f}% 三倍权重")
 
         # 计算平均市场情绪分数
         if sentiment_factors > 0:
@@ -629,7 +767,7 @@ class EnhancedTradingBot:
         return {
             "volatility": avg_volatility if 'avg_volatility' in locals() else 1.0,
             "trend_strength": avg_trend_strength if 'avg_trend_strength' in locals() else 20.0,
-            "btc_change": None,  # 不再尝试获取BTC变化率
+            "btc_change": btc_price_change,
             "take_profit": self.dynamic_take_profit,
             "stop_loss": self.dynamic_stop_loss,
             "market_bias": self.market_bias
@@ -1040,9 +1178,301 @@ class EnhancedTradingBot:
         else:
             return 2  # 默认低杠杆
 
+    def check_entry_timing(self, symbol: str, side: str) -> dict:
+        """
+        检查当前是否是好的入场时机，如果不是则提供预计入场价格和等待时间
+
+        参数:
+            symbol: 交易对符号
+            side: 交易方向 ('BUY' 或 'SELL')
+
+        返回:
+            dict: 包含入场决策和等待建议的字典
+            {
+                "should_enter": 是否应该立即入场(布尔值),
+                "expected_price": 预期入场价格,
+                "wait_minutes": 预计等待分钟数,
+                "reason": 决策理由,
+                "timing_quality": 入场时机质量评估
+            }
+        """
+        from logger_utils import Colors, print_colored
+        from pivot_points_module import calculate_pivot_points, analyze_pivot_point_strategy
+        from indicators_module import find_swing_points, calculate_fibonacci_retracements, get_smc_trend_and_duration
+
+        # 默认返回结果 - 允许入场
+        result = {
+            "should_enter": True,
+            "expected_price": 0.0,
+            "wait_minutes": 0,
+            "reason": "默认允许入场",
+            "timing_quality": "未知"
+        }
+
+        # 获取历史数据
+        df = self.get_historical_data_with_cache(symbol)
+        if df is None or df.empty or len(df) < 20:
+            return result  # 如果无法获取数据，默认允许入场
+
+        # 添加必要的技术指标
+        try:
+            # 确保数据中包含支点
+            if 'Classic_PP' not in df.columns:
+                df = calculate_pivot_points(df, method='classic')
+
+            # 获取支点分析
+            pivot_analysis = analyze_pivot_point_strategy(df, method='classic')
+
+            # 获取当前价格
+            ticker = self.client.futures_symbol_ticker(symbol=symbol)
+            current_price = float(ticker['price'])
+
+            # 获取摆动点
+            swing_highs, swing_lows = find_swing_points(df)
+
+            # 获取Fibonacci回撤水平
+            fib_levels = calculate_fibonacci_retracements(df)
+
+            # 获取趋势信息
+            trend, duration, trend_info = get_smc_trend_and_duration(df)
+
+            # 获取布林带信息
+            bb_upper = df['BB_Upper'].iloc[-1] if 'BB_Upper' in df.columns else None
+            bb_lower = df['BB_Lower'].iloc[-1] if 'BB_Lower' in df.columns else None
+            bb_middle = df['BB_Middle'].iloc[-1] if 'BB_Middle' in df.columns else None
+
+            # 获取ATR信息，用于评估波动性
+            atr = df['ATR'].iloc[-1] if 'ATR' in df.columns else (df['high'].iloc[-1] - df['low'].iloc[-1]) * 0.1
+
+            # 根据ATR和当前价格计算预期等待时间(假设每分钟价格变动约为ATR的5%)
+            atr_per_minute = atr * 0.05
+
+            # 1. 检查买入入场条件
+            if side == "BUY":
+                # 获取关键支撑和阻力位
+                support_1 = pivot_analysis["support_1"]
+                resistance_1 = pivot_analysis["resistance_1"]
+                pivot_point = pivot_analysis["pivot_point"]
+
+                # 买入最佳入场条件:
+
+                # A. 价格已经突破阻力位 - 立即入场
+                if current_price > resistance_1 * 1.005:  # 突破阻力位R1达0.5%
+                    result["should_enter"] = True
+                    result["reason"] = f"价格 {current_price:.6f} 已突破阻力位 R1 {resistance_1:.6f}，确认上涨趋势"
+                    result["timing_quality"] = "优秀"
+                    return result
+
+                # B. 价格在支撑位附近 - 立即入场
+                if current_price < support_1 * 1.01:  # 在支撑位S1附近1%范围内
+                    result["should_enter"] = True
+                    result["reason"] = f"价格 {current_price:.6f} 接近支撑位 S1 {support_1:.6f}，可能反弹"
+                    result["timing_quality"] = "优秀"
+                    return result
+
+                # C. 布林带突破 - 立即入场
+                if bb_upper is not None and current_price > bb_upper * 1.002:
+                    result["should_enter"] = True
+                    result["reason"] = f"价格 {current_price:.6f} 突破布林带上轨 {bb_upper:.6f}，动能上升"
+                    result["timing_quality"] = "优秀"
+                    return result
+
+                # D. 趋势向上且回调到支撑位 - 立即入场
+                if trend == "UP" and current_price < bb_middle * 1.01 and current_price > bb_middle * 0.99:
+                    result["should_enter"] = True
+                    result["reason"] = f"价格回调至中轨附近 {bb_middle:.6f}，上升趋势中的回调买入"
+                    result["timing_quality"] = "良好"
+                    return result
+
+                # E. 特定Fibonacci回撤位 - 立即入场
+                if fib_levels and len(fib_levels) >= 3:
+                    fib_0382 = fib_levels[1]  # 0.382回撤位
+                    fib_0618 = fib_levels[2]  # 0.618回撤位
+
+                    if abs(current_price - fib_0618) / fib_0618 < 0.01:
+                        result["should_enter"] = True
+                        result["reason"] = f"价格 {current_price:.6f} 接近 0.618 Fibonacci回撤位 {fib_0618:.6f}"
+                        result["timing_quality"] = "良好"
+                        return result
+
+                    if abs(current_price - fib_0382) / fib_0382 < 0.01:
+                        result["should_enter"] = True
+                        result["reason"] = f"价格 {current_price:.6f} 接近 0.382 Fibonacci回撤位 {fib_0382:.6f}"
+                        result["timing_quality"] = "良好"
+                        return result
+
+                # F. 支点信号强烈建议买入 - 立即入场
+                if pivot_analysis["signal"] == "BUY" and pivot_analysis["confidence"] >= 0.7:
+                    result["should_enter"] = True
+                    result["reason"] = f"支点分析给出高置信度买入信号: {pivot_analysis['reason']}"
+                    result["timing_quality"] = "良好"
+                    return result
+
+                # 如果没有满足最佳入场条件，提供等待建议:
+
+                # 情况1: 价格高于阻力位下方 - 等待回调
+                if current_price > pivot_point and current_price < resistance_1 * 0.99:
+                    expected_price = resistance_1 * 1.01  # 期望价格突破阻力位1%
+                    price_diff = expected_price - current_price
+                    wait_minutes = max(10, abs(int(price_diff / atr_per_minute)))
+
+                    result["should_enter"] = False
+                    result["expected_price"] = expected_price
+                    result["wait_minutes"] = wait_minutes
+                    result["reason"] = f"价格接近阻力位，等待突破 R1 {resistance_1:.6f} 后入场"
+                    result["timing_quality"] = "一般"
+                    return result
+
+                # 情况2: 价格远离支撑位 - 等待回调到支撑位
+                if current_price > support_1 * 1.03:
+                    expected_price = support_1 * 1.01  # 期望价格靠近支撑位1%内
+                    price_diff = current_price - expected_price
+                    wait_minutes = max(15, abs(int(price_diff / atr_per_minute)))
+
+                    result["should_enter"] = False
+                    result["expected_price"] = expected_price
+                    result["wait_minutes"] = wait_minutes
+                    result["reason"] = f"价格远离支撑位，等待回调至 S1 {support_1:.6f} 附近后入场"
+                    result["timing_quality"] = "一般"
+                    return result
+
+                # 情况3: 价格远离中轨 - 等待回调到中轨
+                if bb_middle is not None and current_price > bb_middle * 1.02:
+                    expected_price = bb_middle
+                    price_diff = current_price - expected_price
+                    wait_minutes = max(12, abs(int(price_diff / atr_per_minute)))
+
+                    result["should_enter"] = False
+                    result["expected_price"] = expected_price
+                    result["wait_minutes"] = wait_minutes
+                    result["reason"] = f"价格高于中轨，等待回调至布林带中轨 {bb_middle:.6f} 后入场"
+                    result["timing_quality"] = "一般"
+                    return result
+
+                # 如果没有明确的等待条件，默认允许入场
+                result["timing_quality"] = "一般"
+                return result
+
+            # 2. 检查卖出入场条件
+            elif side == "SELL":
+                # 获取关键支撑和阻力位
+                support_1 = pivot_analysis["support_1"]
+                resistance_1 = pivot_analysis["resistance_1"]
+                pivot_point = pivot_analysis["pivot_point"]
+
+                # 卖出最佳入场条件:
+
+                # A. 价格已经跌破支撑位 - 立即入场
+                if current_price < support_1 * 0.995:  # 跌破支撑位S1达0.5%
+                    result["should_enter"] = True
+                    result["reason"] = f"价格 {current_price:.6f} 已跌破支撑位 S1 {support_1:.6f}，确认下跌趋势"
+                    result["timing_quality"] = "优秀"
+                    return result
+
+                # B. 价格在阻力位附近 - 立即入场
+                if current_price > resistance_1 * 0.99:  # 在阻力位R1附近1%范围内
+                    result["should_enter"] = True
+                    result["reason"] = f"价格 {current_price:.6f} 接近阻力位 R1 {resistance_1:.6f}，可能回落"
+                    result["timing_quality"] = "优秀"
+                    return result
+
+                # C. 布林带突破 - 立即入场
+                if bb_lower is not None and current_price < bb_lower * 0.998:
+                    result["should_enter"] = True
+                    result["reason"] = f"价格 {current_price:.6f} 跌破布林带下轨 {bb_lower:.6f}，动能下降"
+                    result["timing_quality"] = "优秀"
+                    return result
+
+                # D. 趋势向下且反弹到阻力位 - 立即入场
+                if trend == "DOWN" and current_price < bb_middle * 1.01 and current_price > bb_middle * 0.99:
+                    result["should_enter"] = True
+                    result["reason"] = f"价格反弹至中轨附近 {bb_middle:.6f}，下降趋势中的反弹卖出"
+                    result["timing_quality"] = "良好"
+                    return result
+
+                # E. 特定Fibonacci回撤位 - 立即入场
+                if fib_levels and len(fib_levels) >= 3:
+                    fib_0382 = fib_levels[1]  # 0.382回撤位
+                    fib_0618 = fib_levels[2]  # 0.618回撤位
+
+                    if abs(current_price - fib_0382) / fib_0382 < 0.01:
+                        result["should_enter"] = True
+                        result["reason"] = f"价格 {current_price:.6f} 接近 0.382 Fibonacci回撤位 {fib_0382:.6f}"
+                        result["timing_quality"] = "良好"
+                        return result
+
+                    if abs(current_price - fib_0618) / fib_0618 < 0.01:
+                        result["should_enter"] = True
+                        result["reason"] = f"价格 {current_price:.6f} 接近 0.618 Fibonacci回撤位 {fib_0618:.6f}"
+                        result["timing_quality"] = "良好"
+                        return result
+
+                # F. 支点信号强烈建议卖出 - 立即入场
+                if pivot_analysis["signal"] == "SELL" and pivot_analysis["confidence"] >= 0.7:
+                    result["should_enter"] = True
+                    result["reason"] = f"支点分析给出高置信度卖出信号: {pivot_analysis['reason']}"
+                    result["timing_quality"] = "良好"
+                    return result
+
+                # 如果没有满足最佳入场条件，提供等待建议:
+
+                # 情况1: 价格低于支撑位上方 - 等待跌破
+                if current_price < pivot_point and current_price > support_1 * 1.01:
+                    expected_price = support_1 * 0.99  # 期望价格跌破支撑位1%
+                    price_diff = current_price - expected_price
+                    wait_minutes = max(10, abs(int(price_diff / atr_per_minute)))
+
+                    result["should_enter"] = False
+                    result["expected_price"] = expected_price
+                    result["wait_minutes"] = wait_minutes
+                    result["reason"] = f"价格接近支撑位，等待跌破 S1 {support_1:.6f} 后入场"
+                    result["timing_quality"] = "一般"
+                    return result
+
+                # 情况2: 价格远离阻力位 - 等待反弹到阻力位
+                if current_price < resistance_1 * 0.97:
+                    expected_price = resistance_1 * 0.99  # 期望价格靠近阻力位1%内
+                    price_diff = expected_price - current_price
+                    wait_minutes = max(15, abs(int(price_diff / atr_per_minute)))
+
+                    result["should_enter"] = False
+                    result["expected_price"] = expected_price
+                    result["wait_minutes"] = wait_minutes
+                    result["reason"] = f"价格远离阻力位，等待反弹至 R1 {resistance_1:.6f} 附近后入场"
+                    result["timing_quality"] = "一般"
+                    return result
+
+                # 情况3: 价格远离中轨 - 等待反弹到中轨
+                if bb_middle is not None and current_price < bb_middle * 0.98:
+                    expected_price = bb_middle
+                    price_diff = expected_price - current_price
+                    wait_minutes = max(12, abs(int(price_diff / atr_per_minute)))
+
+                    result["should_enter"] = False
+                    result["expected_price"] = expected_price
+                    result["wait_minutes"] = wait_minutes
+                    result["reason"] = f"价格低于中轨，等待反弹至布林带中轨 {bb_middle:.6f} 后入场"
+                    result["timing_quality"] = "一般"
+                    return result
+
+                # 如果没有明确的等待条件，默认允许入场
+                result["timing_quality"] = "一般"
+                return result
+
+        except Exception as e:
+            # 如果计算过程出错，记录日志并默认允许入场
+            import traceback
+            error_details = traceback.format_exc()
+            print_colored(f"⚠️ 入场时机检查出错: {str(e)}", Colors.ERROR)
+            self.logger.error("入场时机检查出错", extra={"error": str(e), "traceback": error_details})
+            return result
+
+        # 如果执行到这里，表示没有匹配到任何入场条件，返回默认结果
+        return result
+
     def place_futures_order_usdc(self, symbol: str, side: str, amount: float, leverage: int = 5) -> bool:
         """
-        执行期货市场订单 - 增强版，加入预期价格变动检查和固定止盈止损
+        执行期货市场订单 - 增强版，包含入场时机检查和动态止盈止损
 
         参数:
             symbol: 交易对符号
@@ -1056,6 +1486,26 @@ class EnhancedTradingBot:
         import math
         import time
         from logger_utils import Colors, print_colored
+        from pivot_points_module import calculate_pivot_points, analyze_pivot_point_strategy
+        from indicators_module import find_swing_points, calculate_fibonacci_retracements, get_smc_trend_and_duration
+
+        # 检查入场时机
+        entry_timing = self.check_entry_timing(symbol, side)
+
+        # 如果入场时机不佳，提供等待建议但不立即执行交易
+        if not entry_timing["should_enter"]:
+            print_colored(f"\n⏳ {symbol} {side} 入场时机不佳，建议等待", Colors.YELLOW)
+            print_colored(f"预计更好的入场价格: {entry_timing['expected_price']:.6f}", Colors.YELLOW)
+            print_colored(f"预计等待时间: {entry_timing['wait_minutes']} 分钟", Colors.YELLOW)
+            print_colored(f"原因: {entry_timing['reason']}", Colors.YELLOW)
+
+            # 记录入场建议，但不执行交易
+            self.logger.info(f"{symbol} {side} 入场时机不佳", extra={
+                "expected_price": entry_timing['expected_price'],
+                "wait_minutes": entry_timing['wait_minutes'],
+                "reason": entry_timing['reason']
+            })
+            return False
 
         try:
             # 获取当前账户余额
@@ -1066,7 +1516,7 @@ class EnhancedTradingBot:
             ticker = self.client.futures_symbol_ticker(symbol=symbol)
             current_price = float(ticker['price'])
 
-            # 预测未来价格，用于检查最小价格变动
+            # 预测未来价格，用于检查最小价格变动和计算动态止盈止损
             predicted_price = self.predict_short_term_price(symbol, horizon_minutes=60)
             if predicted_price is None:
                 predicted_price = current_price * (1.05 if side == "BUY" else 0.95)  # 默认5%变动
@@ -1079,6 +1529,27 @@ class EnhancedTradingBot:
                 print_colored(f"⚠️ {symbol}的预期价格变动({expected_movement:.2f}%)小于最低要求(2.5%)", Colors.WARNING)
                 self.logger.warning(f"{symbol}预期变动不足", extra={"expected_movement": expected_movement})
                 return False
+
+            # ==== 动态止盈止损计算 ====
+            # 默认止盈止损
+            take_profit = 0.025  # 默认2.5%止盈
+            stop_loss = -0.0175  # 默认1.75%止损
+
+            # 根据预测幅度调整止盈止损
+            if expected_movement >= 12.0:
+                # 超高波动情况
+                take_profit = 0.09  # 9%止盈
+                stop_loss = -0.04  # 4%止损
+                print_colored(f"📈 超高波动预测({expected_movement:.2f}%)：设置止盈为9%，止损为4%",
+                              Colors.GREEN + Colors.BOLD)
+            elif expected_movement >= 8.5:
+                # 高波动情况
+                take_profit = 0.075  # 7.5%止盈
+                stop_loss = -0.04  # 4%止损
+                print_colored(f"📈 高波动预测({expected_movement:.2f}%)：设置止盈为7.5%，止损为4%", Colors.GREEN)
+            else:
+                # 正常波动，使用默认值
+                print_colored(f"📊 正常波动预测({expected_movement:.2f}%)：使用默认止盈2.5%，止损1.75%", Colors.BLUE)
 
             # 严格限制订单金额不超过账户余额的5%
             max_allowed_amount = account_balance * 0.05
@@ -1154,6 +1625,8 @@ class EnhancedTradingBot:
             print_colored(f"🔢 杠杆: {leverage}倍, 实际保证金: {notional / leverage:.2f} USDC", Colors.INFO)
             print_colored(f"📈 预期价格变动: {expected_movement:.2f}%, 从 {current_price:.6f} 到 {predicted_price:.6f}",
                           Colors.INFO)
+            print_colored(f"⚙️ 入场时机评估: {entry_timing['timing_quality']}", Colors.INFO)
+            print_colored(f"⚙️ 入场原因: {entry_timing['reason']}", Colors.INFO)
 
             # 设置杠杆
             try:
@@ -1190,13 +1663,17 @@ class EnhancedTradingBot:
                     "quantity": quantity,
                     "notional": notional,
                     "leverage": leverage,
-                    "expected_movement": expected_movement
+                    "expected_movement": expected_movement,
+                    "take_profit": take_profit * 100,
+                    "stop_loss": abs(stop_loss) * 100,
+                    "entry_quality": entry_timing['timing_quality'],
+                    "entry_reason": entry_timing['reason']
                 })
 
-                # 记录持仓信息 - 使用固定止盈止损比例
+                # 记录持仓信息 - 使用动态止盈止损
                 self.record_open_position(symbol, side, current_price, quantity,
-                                          take_profit=0.025,  # 固定2.5%止盈
-                                          stop_loss=-0.0175)  # 固定1.75%止损
+                                          take_profit=take_profit,  # 动态止盈
+                                          stop_loss=stop_loss)  # 动态止损
                 return True
 
             except Exception as e:
@@ -1387,81 +1864,7 @@ class EnhancedTradingBot:
             self.logger.error(f"平仓过程错误", extra={"symbol": symbol, "error": str(e)})
             return False, []
 
-    def manage_open_positions(self):
-        """管理现有持仓，确保使用固定的止盈止损比例"""
-        self.load_existing_positions()
 
-        if not self.open_positions:
-            self.logger.info("当前无持仓")
-            return
-
-        current_time = time.time()
-        positions_to_remove = []  # 记录需要移除的持仓
-
-        for pos in self.open_positions:
-            symbol = pos["symbol"]
-            position_side = pos.get("position_side", "LONG")
-            entry_price = pos["entry_price"]
-
-            # 获取当前价格
-            try:
-                ticker = self.client.futures_symbol_ticker(symbol=symbol)
-                current_price = float(ticker['price'])
-            except Exception as e:
-                print(f"⚠️ 无法获取 {symbol} 当前价格: {e}")
-                continue
-
-            # 计算盈亏百分比
-            if position_side == "LONG":
-                profit_pct = (current_price - entry_price) / entry_price
-            else:  # SHORT
-                profit_pct = (entry_price - current_price) / entry_price
-
-            # 使用固定的止盈止损比例
-            take_profit = self.dynamic_take_profit  # 动态止盈值
-            stop_loss = self.dynamic_stop_loss  # 动态止损值
-
-            profit_color = Colors.GREEN if profit_pct >= 0 else Colors.RED
-            print(
-                f"{symbol} {position_side}: 当前盈亏 {profit_color}{profit_pct:.2%}{Colors.RESET}, "
-                f"止盈线 {take_profit:.2%}, 止损线 {stop_loss:.2%}"
-            )
-
-            # 检查是否达到止盈条件
-            if profit_pct >= take_profit:
-                print(f"🔔 {symbol} {position_side} 达到止盈条件 ({profit_pct:.2%} >= {take_profit:.2%})，执行平仓...")
-                success, closed = self.close_position(symbol, position_side)
-                if success:
-                    print(f"✅ {symbol} {position_side} 止盈平仓成功!")
-                    positions_to_remove.append(pos)
-                    self.logger.info(f"{symbol} {position_side}止盈平仓", extra={
-                        "profit_pct": profit_pct,
-                        "take_profit": take_profit,
-                        "entry_price": entry_price,
-                        "exit_price": current_price
-                    })
-
-            # 检查是否达到止损条件 - 确保绝对值比较
-            elif profit_pct <= stop_loss:
-                print(f"🔔 {symbol} {position_side} 达到止损条件 ({profit_pct:.2%} <= {stop_loss:.2%})，执行平仓...")
-                success, closed = self.close_position(symbol, position_side)
-                if success:
-                    print(f"✅ {symbol} {position_side} 止损平仓成功!")
-                    positions_to_remove.append(pos)
-                    self.logger.info(f"{symbol} {position_side}止损平仓", extra={
-                        "profit_pct": profit_pct,
-                        "stop_loss": stop_loss,
-                        "entry_price": entry_price,
-                        "exit_price": current_price
-                    })
-
-        # 从持仓列表中移除已平仓的持仓
-        for pos in positions_to_remove:
-            if pos in self.open_positions:
-                self.open_positions.remove(pos)
-
-        # 重新加载持仓以确保数据最新
-        self.load_existing_positions()
 
     def display_positions_status(self):
         """显示所有持仓的状态"""
@@ -2030,7 +2433,7 @@ def show_statistics(self):
 
 
 def check_all_positions_status(self):
-    """检查所有持仓状态，确认是否有任何持仓达到止盈止损条件"""
+    """检查所有持仓状态，确认是否有任何持仓达到止盈止损条件，支持动态止盈止损"""
     self.load_existing_positions()
 
     if not self.open_positions:
@@ -2057,24 +2460,25 @@ def check_all_positions_status(self):
             else:
                 profit_pct = (entry_price - current_price) / entry_price
 
-            # 标准止盈止损值
-            take_profit = 0.025
-            stop_loss = -0.0175
+            # 获取持仓特定的止盈止损设置
+            take_profit = pos.get("dynamic_take_profit", 0.025)  # 默认2.5%
+            stop_loss = pos.get("stop_loss", -0.0175)  # 默认-1.75%
 
             status = "正常"
             action_needed = False
 
             if profit_pct >= take_profit:
-                status = "⚠️ 已达到止盈条件"
+                status = f"⚠️ 已达到止盈条件 ({profit_pct:.2%} >= {take_profit:.2%})"
                 action_needed = True
             elif profit_pct <= stop_loss:
-                status = "⚠️ 已达到止损条件"
+                status = f"⚠️ 已达到止损条件 ({profit_pct:.2%} <= {stop_loss:.2%})"
                 action_needed = True
 
             holding_time = (time.time() - pos["open_time"]) / 3600
 
             print(f"{symbol} {position_side}: 开仓于 {open_time}, 持仓 {holding_time:.2f}小时")
             print(f"  入场价: {entry_price:.6f}, 当前价: {current_price:.6f}, 盈亏: {profit_pct:.2%}")
+            print(f"  止盈: {take_profit:.2%}, 止损: {stop_loss:.2%}")
             print(f"  状态: {status}")
 
             if action_needed:
@@ -2089,7 +2493,6 @@ def check_all_positions_status(self):
             print(f"- {symbol} {side}: {status}")
     else:
         print("\n所有持仓状态正常，没有达到止盈止损条件")
-
 
 
 if __name__ == "__main__":
