@@ -481,48 +481,17 @@ class EnhancedTradingBot:
         return False
 
     def adapt_to_market_conditions(self):
-        """根据市场条件动态调整交易参数 - 改进版"""
+        """根据市场条件动态调整交易参数 - 简化版，完全不依赖BTC数据"""
         print("\n===== 市场条件分析与参数适配 =====")
-
-        # 测试API是否能访问BTC数据
-        try:
-            ticker = self.client.futures_symbol_ticker(symbol="BTCUSDT")
-            print(f"✅ BTC当前价格: {ticker['price']}")
-        except Exception as e:
-            print(f"❌ 无法获取BTC价格: {e}")
 
         # 分析当前市场波动性
         volatility_levels = {}
         trend_strengths = {}
-        btc_price_change = None
-
-        # 获取BTC数据作为整体市场情绪参考
-        btc_df = self.get_btc_data()  # 使用专门的BTC数据获取函数
-        if btc_df is not None and 'close' in btc_df.columns and len(btc_df) > 20:
-            btc_current = btc_df['close'].iloc[-1]
-            btc_prev = btc_df['close'].iloc[-13]  # 约1小时前
-            btc_price_change = (btc_current - btc_prev) / btc_prev * 100
-
-            print(f"📊 BTC 1小时变化率: {btc_price_change:.2f}%")
-        else:
-            # 如果无法获取BTC数据，尝试使用ETH数据替代
-            try:
-                eth_df = self.get_historical_data_with_cache("ETHUSDT", force_refresh=True)
-                if eth_df is not None and 'close' in eth_df.columns and len(eth_df) > 20:
-                    eth_current = eth_df['close'].iloc[-1]
-                    eth_prev = eth_df['close'].iloc[-13]  # 约1小时前
-                    eth_price_change = (eth_current - eth_prev) / eth_prev * 100
-
-                    print(f"📊 ETH 1小时变化率: {eth_price_change:.2f}% (BTC数据不可用，使用ETH替代)")
-                    btc_price_change = eth_price_change  # 使用ETH的变化率代替BTC
-                else:
-                    print(f"⚠️ BTC和ETH数据均不可用，将使用其他指标分析市场情绪")
-            except Exception as e:
-                print(f"⚠️ 获取ETH数据出错: {e}")
-
-        # 计算总体市场情绪分数
         market_sentiment_score = 0.0
         sentiment_factors = 0
+
+        # 完全不尝试获取BTC数据，直接使用交易对数据
+        print("📊 使用交易对组合数据分析市场情绪")
 
         # 分析各交易对的波动性和趋势强度
         for symbol in self.config["TRADE_PAIRS"]:
@@ -540,22 +509,17 @@ class EnhancedTradingBot:
                         adx = df['ADX'].iloc[-1]
                         trend_strengths[symbol] = adx
 
-                # 计算1小时价格变化
+                # 计算1小时价格变化，用于市场情绪计算
                 if len(df) >= 13:  # 确保有足够数据
                     recent_change = (df['close'].iloc[-1] - df['close'].iloc[-13]) / df['close'].iloc[-13] * 100
-
-                    # 用各交易对的价格变化贡献市场情绪分数
                     market_sentiment_score += recent_change
                     sentiment_factors += 1
-
-        # 如果BTC/ETH数据可用，给予更高权重
-        if btc_price_change is not None:
-            market_sentiment_score += btc_price_change * 3  # BTC变化的权重是普通交易对的3倍
-            sentiment_factors += 3
+                    print(f"📊 {symbol} 1小时变化率: {recent_change:.2f}%")
 
         # 计算平均市场情绪分数
         if sentiment_factors > 0:
             avg_market_sentiment = market_sentiment_score / sentiment_factors
+            print(f"📊 平均市场情绪得分: {avg_market_sentiment:.2f}%")
 
             # 根据得分确定市场情绪
             if avg_market_sentiment > 1.5:
@@ -649,24 +613,23 @@ class EnhancedTradingBot:
         self.market_bias = market_bias
 
         # 3. 趋势强度调整
-        if 'avg_trend_strength' in locals():
-            if avg_trend_strength > 30:  # 强趋势市场
-                print(f"🔍 强趋势市场(ADX={avg_trend_strength:.2f})，优先选择趋势明确的交易对")
-                self.trend_priority = True
+        if avg_trend_strength > 30:  # 强趋势市场
+            print(f"🔍 强趋势市场(ADX={avg_trend_strength:.2f})，优先选择趋势明确的交易对")
+            self.trend_priority = True
 
-                # 可以记录强趋势的交易对，优先考虑
-                self.strong_trend_symbols = [sym for sym, adx in trend_strengths.items() if adx > 25]
-                if self.strong_trend_symbols:
-                    print(f"💡 趋势明确的优先交易对: {', '.join(self.strong_trend_symbols)}")
-            else:
-                print(f"🔍 弱趋势或震荡市场(ADX={avg_trend_strength:.2f})，关注支撑阻力")
-                self.trend_priority = False
-                self.strong_trend_symbols = []
+            # 可以记录强趋势的交易对，优先考虑
+            self.strong_trend_symbols = [sym for sym, adx in trend_strengths.items() if adx > 25]
+            if self.strong_trend_symbols:
+                print(f"💡 趋势明确的优先交易对: {', '.join(self.strong_trend_symbols)}")
+        else:
+            print(f"🔍 弱趋势或震荡市场(ADX={avg_trend_strength:.2f})，关注支撑阻力")
+            self.trend_priority = False
+            self.strong_trend_symbols = []
 
         return {
             "volatility": avg_volatility if 'avg_volatility' in locals() else 1.0,
             "trend_strength": avg_trend_strength if 'avg_trend_strength' in locals() else 20.0,
-            "btc_change": btc_price_change,
+            "btc_change": None,  # 不再尝试获取BTC变化率
             "take_profit": self.dynamic_take_profit,
             "stop_loss": self.dynamic_stop_loss,
             "market_bias": self.market_bias
@@ -1540,6 +1503,67 @@ class EnhancedTradingBot:
 
         print("-" * 70)
 
+    def get_btc_data(self):
+        """专门获取BTC数据的方法"""
+        try:
+            # 直接从API获取最新数据，完全绕过缓存
+            print("正在直接从API获取BTC数据...")
+
+            # 尝试不同的交易对名称
+            btc_symbols = ["BTCUSDT", "BTCUSDC"]
+
+            for symbol in btc_symbols:
+                try:
+                    # 直接调用client.futures_klines而不是get_historical_data
+                    klines = self.client.futures_klines(
+                        symbol=symbol,
+                        interval="15m",
+                        limit=30  # 获取足够多的数据点
+                    )
+
+                    if klines and len(klines) > 20:
+                        print(f"✅ 成功获取{symbol}数据: {len(klines)}行")
+
+                        # 转换为DataFrame
+                        df = pd.DataFrame(klines, columns=[
+                            'time', 'open', 'high', 'low', 'close', 'volume',
+                            'close_time', 'quote_asset_volume', 'trades',
+                            'taker_base_vol', 'taker_quote_vol', 'ignore'
+                        ])
+
+                        # 转换数据类型
+                        for col in ['open', 'high', 'low', 'close', 'volume']:
+                            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
+
+                        # 转换时间
+                        df['time'] = pd.to_datetime(df['time'], unit='ms', errors='coerce')
+
+                        print(f"BTC价格范围: {df['close'].min():.2f} - {df['close'].max():.2f}")
+                        return df
+                    else:
+                        print(f"⚠️ {symbol}数据不足或为空")
+                except Exception as e:
+                    print(f"⚠️ 获取{symbol}数据失败: {e}")
+                    continue
+
+            # 如果所有交易对都失败，打印更多调试信息
+            print("🔍 正在尝试获取可用的交易对列表...")
+            try:
+                # 获取可用的交易对列表
+                exchange_info = self.client.futures_exchange_info()
+                available_symbols = [info['symbol'] for info in exchange_info['symbols']]
+                btc_symbols = [sym for sym in available_symbols if 'BTC' in sym]
+                print(f"发现BTC相关交易对: {btc_symbols[:5]}...")
+            except Exception as e:
+                print(f"获取交易对列表失败: {e}")
+
+            print("❌ 所有尝试获取BTC数据的方法都失败了")
+            return None
+
+        except Exception as e:
+            print(f"❌ 获取BTC数据出错: {e}")
+            return None
+
     def load_existing_positions(self):
         """加载现有持仓"""
         self.open_positions = load_positions(self.client, self.logger)
@@ -2067,66 +2091,6 @@ def check_all_positions_status(self):
         print("\n所有持仓状态正常，没有达到止盈止损条件")
 
 
-def get_btc_data(self):
-    """专门获取BTC数据的方法"""
-    try:
-        # 直接从API获取最新数据，完全绕过缓存
-        print("正在直接从API获取BTC数据...")
-
-        # 尝试不同的交易对名称
-        btc_symbols = ["BTCUSDT", "BTCUSDC"]
-
-        for symbol in btc_symbols:
-            try:
-                # 直接调用client.futures_klines而不是get_historical_data
-                klines = self.client.futures_klines(
-                    symbol=symbol,
-                    interval="15m",
-                    limit=30  # 获取足够多的数据点
-                )
-
-                if klines and len(klines) > 20:
-                    print(f"✅ 成功获取{symbol}数据: {len(klines)}行")
-
-                    # 转换为DataFrame
-                    df = pd.DataFrame(klines, columns=[
-                        'time', 'open', 'high', 'low', 'close', 'volume',
-                        'close_time', 'quote_asset_volume', 'trades',
-                        'taker_base_vol', 'taker_quote_vol', 'ignore'
-                    ])
-
-                    # 转换数据类型
-                    for col in ['open', 'high', 'low', 'close', 'volume']:
-                        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
-
-                    # 转换时间
-                    df['time'] = pd.to_datetime(df['time'], unit='ms', errors='coerce')
-
-                    print(f"BTC价格范围: {df['close'].min():.2f} - {df['close'].max():.2f}")
-                    return df
-                else:
-                    print(f"⚠️ {symbol}数据不足或为空")
-            except Exception as e:
-                print(f"⚠️ 获取{symbol}数据失败: {e}")
-                continue
-
-        # 如果所有交易对都失败，打印更多调试信息
-        print("🔍 正在尝试获取可用的交易对列表...")
-        try:
-            # 获取可用的交易对列表
-            exchange_info = self.client.futures_exchange_info()
-            available_symbols = [info['symbol'] for info in exchange_info['symbols']]
-            btc_symbols = [sym for sym in available_symbols if 'BTC' in sym]
-            print(f"发现BTC相关交易对: {btc_symbols[:5]}...")
-        except Exception as e:
-            print(f"获取交易对列表失败: {e}")
-
-        print("❌ 所有尝试获取BTC数据的方法都失败了")
-        return None
-
-    except Exception as e:
-        print(f"❌ 获取BTC数据出错: {e}")
-        return None
 
 if __name__ == "__main__":
     import argparse
