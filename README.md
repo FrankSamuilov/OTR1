@@ -1,4 +1,4 @@
-# OTR BinanceTrading Robots
+# OTR 
  
 
 版权所有 (c) 2015 使用Python的交易员
