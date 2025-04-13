@@ -8,6 +8,7 @@ import numpy as np
 from typing import Dict, List, Tuple, Optional, Union, Any
 from datetime import datetime, timedelta
 from logger_utils import Colors, print_colored
+from smc_entry_conditions import evaluate_price_position_conditions
 
 
 def calculate_entry_timing(df: pd.DataFrame, signal: str,

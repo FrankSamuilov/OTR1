@@ -1,0 +1,1946 @@
+"""
+市场结构分析模块
+专注于短期价格形成机制和订单流动态变化的分析，特别适用于加密货币市场
+"""
+
+import pandas as pd
+import numpy as np
+from typing import Dict, List, Tuple, Optional, Union, Any
+from logger_utils import Colors, print_colored
+
+
+class MarketStructureAnalyzer:
+    """市场结构分析器，专注于短期价格动态和订单流分析"""
+
+    def __init__(self, lookback_window: int = 50):
+        """
+        初始化市场结构分析器
+
+        参数:
+            lookback_window: 分析回溯窗口大小
+        """
+        self.lookback_window = lookback_window
+        self.last_analysis_time = 0
+        self.cached_results = {}
+
+    def analyze(self, df: pd.DataFrame, current_price: float = None) -> Dict[str, Any]:
+        """
+        分析市场结构
+
+        参数:
+            df: 包含OHLC和成交量数据的DataFrame
+            current_price: 当前价格(可选)，如果不提供则使用df中的最后收盘价
+
+        返回:
+            market_structure: 包含市场结构分析结果的字典
+        """
+        if df is None or len(df) < self.lookback_window:
+            print_colored("⚠️ 数据不足，无法进行市场结构分析", Colors.WARNING)
+            return {"valid": False, "error": "insufficient_data"}
+
+        # 使用当前价格或最后收盘价
+        if current_price is None:
+            current_price = df['close'].iloc[-1]
+
+        try:
+            # 1. 识别关键价格水平和压力/支撑区域
+            price_levels = self._identify_key_price_levels(df, current_price)
+
+            # 2. 分析成交量分布
+            volume_profile = self._analyze_volume_profile(df)
+
+            # 3. 检测市场结构突破
+            structure_breaks = self._detect_structure_breaks(df)
+
+            # 4. 分析订单流动态
+            order_flow = self._analyze_order_flow(df)
+
+            # 5. 计算流动性评估
+            liquidity = self._assess_liquidity(df)
+
+            # 6. 识别交易区域和累积/分布模式
+            accumulation_distribution = self._identify_accumulation_distribution(df)
+
+            # 7. 计算价格动量和结构强度
+            momentum = self._calculate_momentum_strength(df)
+
+            # 8. 综合评估市场结构质量
+            structure_quality = self._evaluate_structure_quality(
+                price_levels,
+                volume_profile,
+                structure_breaks,
+                order_flow,
+                liquidity,
+                accumulation_distribution,
+                momentum
+            )
+
+            # 汇总结果
+            result = {
+                "valid": True,
+                "current_price": current_price,
+                "price_levels": price_levels,
+                "volume_profile": volume_profile,
+                "structure_breaks": structure_breaks,
+                "order_flow": order_flow,
+                "liquidity": liquidity,
+                "accumulation_distribution": accumulation_distribution,
+                "momentum": momentum,
+                "structure_quality": structure_quality
+            }
+
+            # 打印关键发现
+            self._print_key_findings(result)
+
+            return result
+
+        except Exception as e:
+            print_colored(f"❌ 市场结构分析失败: {e}", Colors.ERROR)
+            return {"valid": False, "error": str(e)}
+
+    def _identify_key_price_levels(self, df: pd.DataFrame, current_price: float) -> Dict[str, Any]:
+        """识别关键价格水平和支撑/阻力区域"""
+        recent_df = df.tail(self.lookback_window).copy()
+
+        # 初始化结果
+        result = {
+            "support_levels": [],
+            "resistance_levels": [],
+            "high_volume_nodes": [],
+            "fair_value_gap": None,
+            "nearest_support": None,
+            "nearest_resistance": None,
+            "key_level_strength": {}
+        }
+
+        # 1. 识别高成交量点位
+        price_volume = recent_df.groupby(pd.cut(recent_df['close'], bins=20))['volume'].sum()
+        high_vol_bins = price_volume[price_volume > price_volume.mean() * 1.5]
+
+        for bin_idx in high_vol_bins.index:
+            price_point = bin_idx.mid
+            result["high_volume_nodes"].append(float(price_point))
+
+        # 2. 识别近期摆动高低点
+        highs = []
+        lows = []
+
+        # 简化摆动点识别
+        for i in range(2, len(recent_df) - 2):
+            # 当前值大于前后两个值则为摆动高点
+            if (recent_df['high'].iloc[i] > recent_df['high'].iloc[i - 1] and
+                    recent_df['high'].iloc[i] > recent_df['high'].iloc[i - 2] and
+                    recent_df['high'].iloc[i] > recent_df['high'].iloc[i + 1] and
+                    recent_df['high'].iloc[i] > recent_df['high'].iloc[i + 2]):
+                highs.append(recent_df['high'].iloc[i])
+
+            # 当前值小于前后两个值则为摆动低点
+            if (recent_df['low'].iloc[i] < recent_df['low'].iloc[i - 1] and
+                    recent_df['low'].iloc[i] < recent_df['low'].iloc[i - 2] and
+                    recent_df['low'].iloc[i] < recent_df['low'].iloc[i + 1] and
+                    recent_df['low'].iloc[i] < recent_df['low'].iloc[i + 2]):
+                lows.append(recent_df['low'].iloc[i])
+
+        # 3. 识别公平价值缺口 (Fair Value Gap)
+        # 寻找价格快速跳动、成交量较低的区域
+        for i in range(2, len(recent_df) - 1):
+            # 向上缺口
+            if (recent_df['low'].iloc[i] > recent_df['high'].iloc[i - 1] and
+                    recent_df['volume'].iloc[i] < recent_df['volume'].rolling(5).mean().iloc[i]):
+                gap_size = recent_df['low'].iloc[i] - recent_df['high'].iloc[i - 1]
+                gap_mid = recent_df['high'].iloc[i - 1] + gap_size / 2
+                result["fair_value_gap"] = {"price": float(gap_mid), "size": float(gap_size), "direction": "up"}
+                break
+
+            # 向下缺口
+            if (recent_df['high'].iloc[i] < recent_df['low'].iloc[i - 1] and
+                    recent_df['volume'].iloc[i] < recent_df['volume'].rolling(5).mean().iloc[i]):
+                gap_size = recent_df['low'].iloc[i - 1] - recent_df['high'].iloc[i]
+                gap_mid = recent_df['high'].iloc[i] + gap_size / 2
+                result["fair_value_gap"] = {"price": float(gap_mid), "size": float(gap_size), "direction": "down"}
+                break
+
+        # 4. 过滤并整合支撑阻力位
+        # 聚类相近的价格水平
+        all_highs = sorted(highs)
+        all_lows = sorted(lows)
+
+        # 过滤相近的高点
+        filtered_highs = []
+        for high in all_highs:
+            if not filtered_highs or min([abs(high - h) / high for h in filtered_highs]) > 0.005:  # 0.5%阈值
+                filtered_highs.append(high)
+
+        # 过滤相近的低点
+        filtered_lows = []
+        for low in all_lows:
+            if not filtered_lows or min([abs(low - l) / low for l in filtered_lows]) > 0.005:  # 0.5%阈值
+                filtered_lows.append(low)
+
+        # 保存支撑阻力位
+        for high in filtered_highs:
+            # 只有高于当前价格的作为阻力位
+            if high > current_price:
+                result["resistance_levels"].append(float(high))
+
+                # 计算强度：触及次数
+                touches = sum(1 for h in recent_df['high'] if abs(h - high) / high < 0.003)
+                result["key_level_strength"][str(high)] = touches
+
+        for low in filtered_lows:
+            # 只有低于当前价格的作为支撑位
+            if low < current_price:
+                result["support_levels"].append(float(low))
+
+                # 计算强度：触及次数
+                touches = sum(1 for l in recent_df['low'] if abs(l - low) / low < 0.003)
+                result["key_level_strength"][str(low)] = touches
+
+        # 5. 找出最近的支撑和阻力
+        if result["support_levels"]:
+            result["nearest_support"] = max(result["support_levels"])
+
+        if result["resistance_levels"]:
+            result["nearest_resistance"] = min(result["resistance_levels"])
+
+        # 6. 计算价格距离
+        if result["nearest_support"]:
+            result["support_distance"] = (current_price - result["nearest_support"]) / current_price
+        else:
+            result["support_distance"] = None
+
+        if result["nearest_resistance"]:
+            result["resistance_distance"] = (result["nearest_resistance"] - current_price) / current_price
+        else:
+            result["resistance_distance"] = None
+
+        return result
+
+    def _analyze_volume_profile(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """分析成交量分布情况"""
+        recent_df = df.tail(self.lookback_window).copy()
+
+        result = {
+            "delta_volume": [],  # 买卖差值
+            "vwap": float(0),  # 成交量加权平均价
+            "poc": float(0),  # 最大成交量价格(Point of Control)
+            "volume_trend": "neutral",
+            "buying_pressure": 0.0,
+            "selling_pressure": 0.0,
+            "abnormal_volume": False
+        }
+
+        # 1. 计算Delta Volume (买卖压力差)
+        for i in range(len(recent_df)):
+            if recent_df['close'].iloc[i] >= recent_df['open'].iloc[i]:
+                # 上涨，视为买方成交量
+                result["delta_volume"].append(recent_df['volume'].iloc[i])
+            else:
+                # 下跌，视为卖方成交量
+                result["delta_volume"].append(-recent_df['volume'].iloc[i])
+
+        # 2. 计算成交量加权平均价 (VWAP)
+        result["vwap"] = float(np.sum(recent_df['close'] * recent_df['volume']) / np.sum(recent_df['volume']))
+
+        # 3. 确定成交量最大的价格区间 (Point of Control)
+        price_bins = pd.cut(recent_df['close'], bins=20)
+        volume_profile = recent_df.groupby(price_bins)['volume'].sum()
+        max_vol_bin = volume_profile.idxmax()
+        result["poc"] = float(max_vol_bin.mid)
+
+        # 4. 判断成交量趋势
+        recent_vol = recent_df['volume'].tail(5).mean()
+        prev_vol = recent_df['volume'].iloc[-10:-5].mean()
+
+        if recent_vol > prev_vol * 1.2:
+            result["volume_trend"] = "increasing"
+        elif recent_vol < prev_vol * 0.8:
+            result["volume_trend"] = "decreasing"
+        else:
+            result["volume_trend"] = "neutral"
+
+        # 5. 计算买卖压力
+        buying_volume = sum(vol for vol in result["delta_volume"] if vol > 0)
+        selling_volume = sum(abs(vol) for vol in result["delta_volume"] if vol < 0)
+        total_volume = buying_volume + selling_volume
+
+        if total_volume > 0:
+            result["buying_pressure"] = buying_volume / total_volume
+            result["selling_pressure"] = selling_volume / total_volume
+
+        # 6. 检测异常成交量
+        avg_vol = recent_df['volume'].mean()
+        last_vol = recent_df['volume'].iloc[-1]
+        result["abnormal_volume"] = last_vol > avg_vol * 2
+
+        return result
+
+    def _detect_structure_breaks(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """检测市场结构突破"""
+        recent_df = df.tail(self.lookback_window).copy()
+
+        result = {
+            "higher_highs": False,
+            "higher_lows": False,
+            "lower_highs": False,
+            "lower_lows": False,
+            "recent_structure_break": None,
+            "break_strength": 0.0,
+            "validated_by_volume": False,
+            "bullish_structure": False,
+            "bearish_structure": False
+        }
+
+        # 分析价格结构
+        highs = []
+        lows = []
+
+        for i in range(2, len(recent_df) - 2):
+            # 识别摆动高点
+            if (recent_df['high'].iloc[i] > recent_df['high'].iloc[i - 1] and
+                    recent_df['high'].iloc[i] > recent_df['high'].iloc[i - 2] and
+                    recent_df['high'].iloc[i] > recent_df['high'].iloc[i + 1] and
+                    recent_df['high'].iloc[i] > recent_df['high'].iloc[i + 2]):
+                highs.append((i, recent_df['high'].iloc[i]))
+
+            # 识别摆动低点
+            if (recent_df['low'].iloc[i] < recent_df['low'].iloc[i - 1] and
+                    recent_df['low'].iloc[i] < recent_df['low'].iloc[i - 2] and
+                    recent_df['low'].iloc[i] < recent_df['low'].iloc[i + 1] and
+                    recent_df['low'].iloc[i] < recent_df['low'].iloc[i + 2]):
+                lows.append((i, recent_df['low'].iloc[i]))
+
+        # 确保有足够的摆动点
+        if len(highs) >= 2 and len(lows) >= 2:
+            # 检查是否形成更高的高点和低点 (上升结构)
+            if highs[-1][1] > highs[-2][1] and lows[-1][1] > lows[-2][1]:
+                result["higher_highs"] = True
+                result["higher_lows"] = True
+                result["bullish_structure"] = True
+
+            # 检查是否形成更低的高点和低点 (下降结构)
+            if highs[-1][1] < highs[-2][1] and lows[-1][1] < lows[-2][1]:
+                result["lower_highs"] = True
+                result["lower_lows"] = True
+                result["bearish_structure"] = True
+
+        # 检测结构突破
+        if len(highs) >= 3 and len(lows) >= 3:
+            if highs[-1][1] > max(h[1] for h in highs[:-1]):
+                # 突破前期高点
+                result["recent_structure_break"] = {
+                    "type": "resistance",
+                    "price": float(highs[-1][1]),
+                    "index": highs[-1][0]
+                }
+
+                # 检查突破强度：价格和成交量确认
+                break_idx = highs[-1][0]
+                prev_high = max(h[1] for h in highs[:-1])
+                break_size = (highs[-1][1] - prev_high) / prev_high
+                volume_confirm = recent_df['volume'].iloc[break_idx] > recent_df['volume'].iloc[
+                                                                       break_idx - 5:break_idx].mean()
+
+                result["break_strength"] = break_size * 100  # 转为百分比
+                result["validated_by_volume"] = volume_confirm
+
+            elif lows[-1][1] < min(l[1] for l in lows[:-1]):
+                # 突破前期低点
+                result["recent_structure_break"] = {
+                    "type": "support",
+                    "price": float(lows[-1][1]),
+                    "index": lows[-1][0]
+                }
+
+                # 检查突破强度：价格和成交量确认
+                break_idx = lows[-1][0]
+                prev_low = min(l[1] for l in lows[:-1])
+                break_size = (prev_low - lows[-1][1]) / prev_low
+                volume_confirm = recent_df['volume'].iloc[break_idx] > recent_df['volume'].iloc[
+                                                                       break_idx - 5:break_idx].mean()
+
+                result["break_strength"] = break_size * 100  # 转为百分比
+                result["validated_by_volume"] = volume_confirm
+
+        return result
+
+    def _analyze_order_flow(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """分析订单流动态"""
+        recent_df = df.tail(self.lookback_window).copy()
+
+        result = {
+            "buying_momentum": 0.0,
+            "selling_momentum": 0.0,
+            "imbalance_ratio": 0.0,
+            "absorption_levels": [],
+            "smart_money_activity": "neutral",
+            "fake_breakouts": [],
+            "stop_runs": []
+        }
+
+        # 1. 计算动量指标
+        recent_df['close_change'] = recent_df['close'].diff()
+        recent_df['momentum'] = recent_df['close_change'] * recent_df['volume']
+
+        # 分离买入和卖出动量
+        buy_momentum = recent_df[recent_df['close_change'] > 0]['momentum'].sum()
+        sell_momentum = abs(recent_df[recent_df['close_change'] < 0]['momentum'].sum())
+
+        total_momentum = buy_momentum + sell_momentum
+        if total_momentum > 0:
+            result["buying_momentum"] = buy_momentum / total_momentum
+            result["selling_momentum"] = sell_momentum / total_momentum
+            result["imbalance_ratio"] = max(buy_momentum, sell_momentum) / min(buy_momentum, sell_momentum) if min(
+                buy_momentum, sell_momentum) > 0 else 0
+
+        # 2. 识别吸收水平 - 大量成交但价格变化小的区域
+        for i in range(5, len(recent_df) - 1):
+            window = recent_df.iloc[i - 5:i + 1]
+            price_range = (window['high'].max() - window['low'].min()) / window['close'].mean()
+            volume_ratio = window['volume'].sum() / (recent_df['volume'].mean() * 5)
+
+            # 高成交量但价格范围小表示吸收
+            if price_range < 0.01 and volume_ratio > 1.5:
+                result["absorption_levels"].append({
+                    "price": float(window['close'].iloc[-1]),
+                    "volume_ratio": float(volume_ratio),
+                    "index": i
+                })
+
+        # 3. 检测聪明资金活动
+        # 与吸收水平相关
+        if result["absorption_levels"]:
+            # 最近的吸收水平
+            recent_abs = result["absorption_levels"][-1]
+            abs_idx = recent_abs["index"]
+
+            # 在吸收后价格方向
+            if abs_idx < len(recent_df) - 3:  # 确保有足够的后续数据
+                post_abs_move = recent_df['close'].iloc[-1] - recent_df['close'].iloc[abs_idx]
+
+                if post_abs_move > 0 and recent_abs["volume_ratio"] > 2:
+                    result["smart_money_activity"] = "accumulation"
+                elif post_abs_move < 0 and recent_abs["volume_ratio"] > 2:
+                    result["smart_money_activity"] = "distribution"
+
+        # 4. 检测虚假突破
+        for i in range(5, len(recent_df) - 5):
+            # 潜在的突破
+            if (recent_df['high'].iloc[i] > recent_df['high'].iloc[i - 5:i].max()):
+                # 但很快回落
+                if recent_df['close'].iloc[i + 5] < recent_df['close'].iloc[i]:
+                    result["fake_breakouts"].append({
+                        "price": float(recent_df['high'].iloc[i]),
+                        "index": i,
+                        "direction": "up"
+                    })
+
+            if (recent_df['low'].iloc[i] < recent_df['low'].iloc[i - 5:i].min()):
+                # 但很快回升
+                if recent_df['close'].iloc[i + 5] > recent_df['close'].iloc[i]:
+                    result["fake_breakouts"].append({
+                        "price": float(recent_df['low'].iloc[i]),
+                        "index": i,
+                        "direction": "down"
+                    })
+
+        # 5. 检测止损触发
+        for i in range(5, len(recent_df) - 3):
+            # 快速向下
+            if (recent_df['low'].iloc[i] < recent_df['low'].iloc[i - 5:i].min() and
+                    recent_df['close'].iloc[i] < recent_df['open'].iloc[i]):
+
+                # 但随后反弹
+                if recent_df['close'].iloc[i + 3] > recent_df['close'].iloc[i]:
+                    result["stop_runs"].append({
+                        "price": float(recent_df['low'].iloc[i]),
+                        "index": i,
+                        "direction": "down"
+                    })
+
+            # 快速向上
+            if (recent_df['high'].iloc[i] > recent_df['high'].iloc[i - 5:i].max() and
+                    recent_df['close'].iloc[i] > recent_df['open'].iloc[i]):
+
+                # 但随后回落
+                if recent_df['close'].iloc[i + 3] < recent_df['close'].iloc[i]:
+                    result["stop_runs"].append({
+                        "price": float(recent_df['high'].iloc[i]),
+                        "index": i,
+                        "direction": "up"
+                    })
+
+        return result
+
+    def _assess_liquidity(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """评估市场流动性"""
+        recent_df = df.tail(self.lookback_window).copy()
+
+        result = {
+            "liquidity_score": 0.0,
+            "depth_score": 0.0,
+            "volatility_adjusted_liquidity": 0.0,
+            "low_liquidity_zones": [],
+            "high_liquidity_zones": []
+        }
+
+        # 1. 计算基本流动性分数
+        # 使用成交量和价格波动的关系估计
+        avg_volume = recent_df['volume'].mean()
+
+        if 'ATR' in recent_df.columns:
+            volatility = recent_df['ATR'].iloc[-1]
+        else:
+            # 计算波动性 (基于真实范围TR)
+            high_low = recent_df['high'] - recent_df['low']
+            high_close = abs(recent_df['high'] - recent_df['close'].shift(1))
+            low_close = abs(recent_df['low'] - recent_df['close'].shift(1))
+            tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+            volatility = tr.mean()
+
+        # 流动性评分 = 成交量 / 波动性 (经验值)
+        if volatility > 0:
+            result["liquidity_score"] = min(10, (avg_volume / volatility) / 1000)
+        else:
+            result["liquidity_score"] = 5.0  # 默认中等流动性
+
+        # 2. 计算深度分数
+        # 基于价格稳定性估计
+        price_stdev = recent_df['close'].pct_change().std()
+        result["depth_score"] = min(10, 0.01 / price_stdev) if price_stdev > 0 else 5.0
+
+        # 3. 波动性调整的流动性
+        vol_ratio = recent_df['volume'].iloc[-1] / avg_volume
+
+        if volatility > 0:
+            result["volatility_adjusted_liquidity"] = vol_ratio / (volatility * 10)
+        else:
+            result["volatility_adjusted_liquidity"] = vol_ratio
+
+        # 4. 识别低流动性区域
+        for i in range(5, len(recent_df) - 5):
+            window = recent_df.iloc[i - 5:i + 5]
+            avg_vol = window['volume'].mean()
+
+            if recent_df['volume'].iloc[i] < avg_vol * 0.5:
+                price = recent_df['close'].iloc[i]
+
+                # 检查是否已有相近价格点
+                is_new = all(abs(price - zone["price"]) / price > 0.01 for zone in result["low_liquidity_zones"])
+
+                if is_new:
+                    result["low_liquidity_zones"].append({
+                        "price": float(price),
+                        "volume_ratio": float(recent_df['volume'].iloc[i] / avg_vol)
+                    })
+
+        # 5. 识别高流动性区域
+        for i in range(5, len(recent_df) - 5):
+            window = recent_df.iloc[i - 5:i + 5]
+            avg_vol = window['volume'].mean()
+
+            if recent_df['volume'].iloc[i] > avg_vol * 2:
+                price = recent_df['close'].iloc[i]
+
+                # 检查是否已有相近价格点
+                is_new = all(abs(price - zone["price"]) / price > 0.01 for zone in result["high_liquidity_zones"])
+
+                if is_new:
+                    result["high_liquidity_zones"].append({
+                        "price": float(price),
+                        "volume_ratio": float(recent_df['volume'].iloc[i] / avg_vol)
+                    })
+
+        return result
+
+    def _identify_accumulation_distribution(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """识别交易区域和累积/分布模式"""
+        recent_df = df.tail(self.lookback_window).copy()
+
+        result = {
+            "pattern": "neutral",
+            "range_bound": False,
+            "range_top": None,
+            "range_bottom": None,
+            "accumulation_signs": 0,
+            "distribution_signs": 0,
+            "in_consolidation": False,
+            "consolidation_duration": 0,
+            "stage": None
+        }
+
+        # 1. 判断价格是否在区间内波动
+        price_range = (recent_df['high'].max() - recent_df['low'].min()) / recent_df['close'].mean()
+
+        if price_range < 0.07:  # 7%的价格区间视为盘整
+            result["range_bound"] = True
+            result["range_top"] = float(recent_df['high'].max())
+            result["range_bottom"] = float(recent_df['low'].min())
+
+        # 2. 分析交易模式
+        if result["range_bound"]:
+            # 检查区间强度: 必须至少测试过上下边界各两次
+            highs_near_top = sum(
+                1 for h in recent_df['high'] if abs(h - result["range_top"]) / result["range_top"] < 0.01)
+            lows_near_bottom = sum(
+                1 for l in recent_df['low'] if abs(l - result["range_bottom"]) / result["range_bottom"] < 0.01)
+
+            if highs_near_top >= 2 and lows_near_bottom >= 2:
+                result["in_consolidation"] = True
+
+                # 估计盘整持续时间
+                result["consolidation_duration"] = len(recent_df)
+
+                # 分析盘整中的成交量模式
+                # 成交量减少通常是累积的标志
+                vol_start = recent_df['volume'].iloc[:int(len(recent_df) / 3)].mean()
+                vol_end = recent_df['volume'].iloc[-int(len(recent_df) / 3):].mean()
+
+                if vol_end < vol_start * 0.8:
+                    result["accumulation_signs"] += 1
+                elif vol_end > vol_start * 1.2:
+                    result["distribution_signs"] += 1
+
+                # 判断价格在区间内的位置
+                last_close = recent_df['close'].iloc[-1]
+                range_position = (last_close - result["range_bottom"]) / (result["range_top"] - result["range_bottom"])
+
+                if range_position < 0.3:
+                    # 接近区间底部
+                    result["accumulation_signs"] += 1
+                elif range_position > 0.7:
+                    # 接近区间顶部
+                    result["distribution_signs"] += 1
+
+                # 检查区间测试失败的特征
+                for i in range(5, len(recent_df)):
+                    # 向上测试失败
+                    if (recent_df['high'].iloc[i] > recent_df['high'].iloc[i - 5:i].max() * 0.99 and
+                            recent_df['close'].iloc[i] < recent_df['open'].iloc[i]):
+                        result["distribution_signs"] += 0.5
+
+                    # 向下测试失败
+                    if (recent_df['low'].iloc[i] < recent_df['low'].iloc[i - 5:i].min() * 1.01 and
+                            recent_df['close'].iloc[i] > recent_df['open'].iloc[i]):
+                        result["accumulation_signs"] += 0.5
+
+        # 3. 确定当前模式
+        if result["accumulation_signs"] > result["distribution_signs"] + 1:
+            result["pattern"] = "accumulation"
+            # 使用怀尔德夫理论的阶段
+            if result["consolidation_duration"] > 15:
+                result["stage"] = "phase_c"  # 最后累积阶段
+            else:
+                result["stage"] = "phase_b"  # 中间累积阶段
+        elif result["distribution_signs"] > result["accumulation_signs"] + 1:
+            result["pattern"] = "distribution"
+            if result["consolidation_duration"] > 15:
+                result["stage"] = "phase_c"  # 最后分布阶段
+            else:
+                result["stage"] = "phase_b"  # 中间分布阶段
+        else:
+            result["pattern"] = "neutral"
+            result["stage"] = "phase_a"  # 初始阶段
+
+        return result
+
+    def _calculate_momentum_strength(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """计算价格动量和结构强度"""
+        recent_df = df.tail(self.lookback_window).copy()
+
+        result = {
+            "price_momentum": 0.0,
+            "momentum_divergence": False,
+            "buying_climax": False,
+            "selling_climax": False,
+            "market_structure_strength": 0.0,
+            "expected_continuation": 0.0
+        }
+
+        # 1. 计算价格动量
+        recent_df['momentum'] = recent_df['close'].diff(3)
+        last_momentum = recent_df['momentum'].iloc[-1]
+
+        if recent_df['close'].iloc[-1] > recent_df['close'].iloc[-10]:
+            # 上升趋势中的动量
+            avg_momentum = recent_df['momentum'].iloc[-10:].mean()
+            result["price_momentum"] = last_momentum / avg_momentum if avg_momentum != 0 else 0
+        else:
+            # 下降趋势中的动量
+            avg_momentum = recent_df['momentum'].iloc[-10:].mean()
+            result["price_momentum"] = last_momentum / avg_momentum if avg_momentum != 0 else 0
+
+        # 2. 检测背离
+        if 'RSI' in recent_df.columns:
+            price_making_higher_high = recent_df['close'].iloc[-1] > recent_df['close'].iloc[-5:-1].max()
+            rsi_making_higher_high = recent_df['RSI'].iloc[-1] > recent_df['RSI'].iloc[-5:-1].max()
+
+            price_making_lower_low = recent_df['close'].iloc[-1] < recent_df['close'].iloc[-5:-1].min()
+            rsi_making_lower_low = recent_df['RSI'].iloc[-1] < recent_df['RSI'].iloc[-5:-1].min()
+
+            # 检测看跌背离：价格创新高但RSI未创新高
+            bearish_divergence = price_making_higher_high and not rsi_making_higher_high
+
+            # 检测看涨背离：价格创新低但RSI未创新低
+            bullish_divergence = price_making_lower_low and not rsi_making_lower_low
+
+            result["momentum_divergence"] = bearish_divergence or bullish_divergence
+
+            if bearish_divergence:
+                result["price_momentum"] *= -1  # 转为负值表示反转风险
+
+        # 3. 检测高潮点
+        # 买入高潮通常是价格急剧上涨后的大量成交
+        if len(recent_df) >= 5:
+            last_5_returns = recent_df['close'].pct_change().iloc[-5:].mean() * 100  # 百分比回报
+            last_vol_vs_avg = recent_df['volume'].iloc[-1] / recent_df['volume'].iloc[-10:-1].mean()
+
+            # 买入高潮：强势上涨后的高成交量
+            if last_5_returns > 3 and last_vol_vs_avg > 2:
+                result["buying_climax"] = True
+
+            # 卖出高潮：强势下跌后的高成交量
+            if last_5_returns < -3 and last_vol_vs_avg > 2:
+                result["selling_climax"] = True
+
+        # 4. 计算市场结构强度
+        # 基于价格波动与趋势方向的一致性
+        close_changes = recent_df['close'].diff().dropna()
+        positive_moves = sum(1 for x in close_changes if x > 0)
+        negative_moves = len(close_changes) - positive_moves
+
+        # 计算正负波动的强度
+        positive_strength = positive_moves / len(close_changes) if len(close_changes) > 0 else 0.5
+        positive_magnitude = close_changes[close_changes > 0].mean() if len(close_changes[close_changes > 0]) > 0 else 0
+
+        negative_strength = negative_moves / len(close_changes) if len(close_changes) > 0 else 0.5
+        negative_magnitude = abs(close_changes[close_changes < 0].mean()) if len(
+            close_changes[close_changes < 0]) > 0 else 0
+
+        # 计算结构强度：-10到+10，+表示上升结构强，-表示下降结构强
+        if positive_magnitude > 0 or negative_magnitude > 0:
+            result["market_structure_strength"] = 10 * (
+                    (positive_strength * positive_magnitude - negative_strength * negative_magnitude) /
+                    (positive_magnitude + negative_magnitude)
+            )
+
+        # 5. 估计趋势持续概率
+        # 综合考虑动量、结构强度和无背离
+        momentum_factor = min(abs(result["price_momentum"]), 3) / 3  # 标准化到0-1
+        structure_factor = abs(result["market_structure_strength"]) / 10  # 标准化到0-1
+        divergence_factor = 0.5 if result["momentum_divergence"] else 1.0  # 背离降低持续概率
+
+        result["expected_continuation"] = (
+                                                      momentum_factor * 0.4 + structure_factor * 0.6) * divergence_factor  # 60%权重给结构
+
+        return result
+
+    def _evaluate_structure_quality(self, price_levels, volume_profile, structure_breaks,
+                                    order_flow, liquidity, accumulation_distribution, momentum) -> Dict[str, Any]:
+        """综合评估市场结构质量"""
+        result = {
+            "overall_score": 0.0,
+            "bullish_bias_score": 0.0,
+            "structure_reliability": 0.0,
+            "opportunity_quality": 0.0,
+            "risk_level": "medium",
+            "trade_context": [],
+            "key_insights": []
+        }
+
+        # 1. 计算总体分数
+        # 基础分5分，根据各项指标加减
+        base_score = 5.0
+        score_components = {}
+
+        # 2. 根据价格水平评分
+        price_level_score = 0.0
+
+        if price_levels["nearest_support"] is not None and price_levels["nearest_resistance"] is not None:
+            support_distance = price_levels["support_distance"]
+            resistance_distance = price_levels["resistance_distance"]
+
+            # 如果价格接近支撑位，加分
+            if support_distance is not None and support_distance < 0.01:  # 1%以内
+                price_level_score += 1.0
+                result["trade_context"].append("价格接近强支撑位")
+
+            # 如果价格远离阻力位，加分
+            if resistance_distance is not None and resistance_distance > 0.05:  # 5%以上
+                price_level_score += 0.5
+                result["trade_context"].append("价格远离主要阻力位")
+
+            # 评估风险回报比
+            if support_distance is not None and resistance_distance is not None:
+                risk_reward = resistance_distance / support_distance if support_distance > 0 else 0
+                if risk_reward > 3:
+                    price_level_score += 1.0
+                    result["trade_context"].append(f"风险回报比良好: {risk_reward:.1f}")
+                elif risk_reward < 1:
+                    price_level_score -= 1.0
+                    result["trade_context"].append(f"风险回报比不佳: {risk_reward:.1f}")
+
+        score_components["price_levels"] = price_level_score
+
+        # 3. 根据成交量分布评分
+        volume_score = 0.0
+
+        if volume_profile["buying_pressure"] > 0.65:
+            volume_score += 1.0
+            result["trade_context"].append(f"强买入压力: {volume_profile['buying_pressure']:.2f}")
+        elif volume_profile["selling_pressure"] > 0.65:
+            volume_score -= 1.0
+            result["trade_context"].append(f"强卖出压力: {volume_profile['selling_pressure']:.2f}")
+
+        if volume_profile["abnormal_volume"]:
+            if volume_profile["buying_pressure"] > volume_profile["selling_pressure"]:
+                volume_score += 0.5
+                result["trade_context"].append("异常高成交量伴随买压")
+            else:
+                volume_score -= 0.5
+                result["trade_context"].append("异常高成交量伴随卖压")
+
+        score_components["volume"] = volume_score
+
+        # 4. 根据结构突破评分
+        structure_score = 0.0
+
+        if structure_breaks["bullish_structure"]:
+            structure_score += 1.0
+            result["trade_context"].append("看涨市场结构（更高的高点和低点）")
+        elif structure_breaks["bearish_structure"]:
+            structure_score -= 1.0
+            result["trade_context"].append("看跌市场结构（更低的高点和低点）")
+
+        if structure_breaks["recent_structure_break"]:
+            break_type = structure_breaks["recent_structure_break"]["type"]
+            break_strength = structure_breaks["break_strength"]
+
+            if break_type == "resistance" and structure_breaks["validated_by_volume"]:
+                structure_score += 1.5
+                result["trade_context"].append(f"有效突破阻力位，强度: {break_strength:.1f}%")
+                result["key_insights"].append("突破得到成交量确认，突破可能持续")
+            elif break_type == "resistance" and not structure_breaks["validated_by_volume"]:
+                structure_score += 0.5
+                result["trade_context"].append(f"突破阻力位但成交量确认不足")
+                result["key_insights"].append("缺乏成交量确认的突破更容易失败")
+            elif break_type == "support" and structure_breaks["validated_by_volume"]:
+                structure_score -= 1.5
+                result["trade_context"].append(f"有效跌破支撑位，强度: {break_strength:.1f}%")
+                result["key_insights"].append("跌破得到成交量确认，跌势可能持续")
+            elif break_type == "support" and not structure_breaks["validated_by_volume"]:
+                structure_score -= 0.5
+                result["trade_context"].append(f"跌破支撑位但成交量确认不足")
+                result["key_insights"].append("缺乏成交量确认的跌破更容易反弹")
+
+        score_components["structure"] = structure_score
+
+        # 5. 根据订单流分析评分
+        order_flow_score = 0.0
+
+        imbalance_ratio = order_flow["imbalance_ratio"]
+        if imbalance_ratio > 2 and order_flow["buying_momentum"] > order_flow["selling_momentum"]:
+            order_flow_score += 1.0
+            result["trade_context"].append(f"买入动量明显强于卖出动量，比率: {imbalance_ratio:.1f}")
+        elif imbalance_ratio > 2 and order_flow["selling_momentum"] > order_flow["buying_momentum"]:
+            order_flow_score -= 1.0
+            result["trade_context"].append(f"卖出动量明显强于买入动量，比率: {imbalance_ratio:.1f}")
+
+        if order_flow["smart_money_activity"] == "accumulation":
+            order_flow_score += 1.5
+            result["key_insights"].append("检测到聪明资金累积行为")
+        elif order_flow["smart_money_activity"] == "distribution":
+            order_flow_score -= 1.5
+            result["key_insights"].append("检测到聪明资金分配行为")
+
+        if order_flow["fake_breakouts"]:
+            recent_fake = order_flow["fake_breakouts"][-1] if order_flow["fake_breakouts"] else None
+            if recent_fake and recent_fake["direction"] == "up":
+                order_flow_score -= 1.0
+                result["key_insights"].append("最近出现向上虚假突破")
+            elif recent_fake and recent_fake["direction"] == "down":
+                order_flow_score += 1.0
+                result["key_insights"].append("最近出现向下虚假突破")
+
+        score_components["order_flow"] = order_flow_score
+
+        # 6. 根据流动性评分
+        liquidity_score = 0.0
+
+        if liquidity["liquidity_score"] > 7:
+            liquidity_score += 0.5
+            result["trade_context"].append("市场流动性良好")
+        elif liquidity["liquidity_score"] < 3:
+            liquidity_score -= 1.0
+            result["trade_context"].append("市场流动性差，交易风险增加")
+            result["key_insights"].append("低流动性可能导致滑点和剧烈价格波动")
+
+        score_components["liquidity"] = liquidity_score
+
+        # 7. 根据累积/分布模式评分
+        pattern_score = 0.0
+
+        if accumulation_distribution["pattern"] == "accumulation":
+            pattern_score += 2.0
+            if accumulation_distribution["stage"] == "phase_c":
+                pattern_score += 0.5
+                result["key_insights"].append("处于累积阶段C，可能即将向上突破")
+            result["trade_context"].append(f"价格处于累积模式，阶段: {accumulation_distribution['stage']}")
+        elif accumulation_distribution["pattern"] == "distribution":
+            pattern_score -= 2.0
+            if accumulation_distribution["stage"] == "phase_c":
+                pattern_score -= 0.5
+                result["key_insights"].append("处于分布阶段C，可能即将向下突破")
+            result["trade_context"].append(f"价格处于分布模式，阶段: {accumulation_distribution['stage']}")
+
+        if accumulation_distribution["in_consolidation"]:
+            if accumulation_distribution["consolidation_duration"] > 20:
+                pattern_score += 0.5  # 长时间盘整后突破概率更高
+                result["trade_context"].append(
+                    f"长时间盘整: {accumulation_distribution['consolidation_duration']}个周期")
+
+            range_height = (accumulation_distribution["range_top"] - accumulation_distribution["range_bottom"]) / \
+                           accumulation_distribution["range_bottom"]
+            if range_height < 0.05:  # 5%的窄幅震荡
+                pattern_score += 0.5
+                result["trade_context"].append("价格处于窄幅盘整区间")
+
+        score_components["pattern"] = pattern_score
+
+        # 8. 根据动量强度评分
+        momentum_score = 0.0
+
+        if abs(momentum["market_structure_strength"]) > 5:
+            if momentum["market_structure_strength"] > 0:
+                momentum_score += 1.0
+                result["trade_context"].append(f"上升结构强度高: {momentum['market_structure_strength']:.1f}/10")
+            else:
+                momentum_score -= 1.0
+                result["trade_context"].append(f"下降结构强度高: {momentum['market_structure_strength']:.1f}/10")
+
+        if momentum["momentum_divergence"]:
+            if momentum["price_momentum"] > 0:
+                momentum_score -= 1.0
+                result["key_insights"].append("价格与动量指标出现看跌背离")
+            else:
+                momentum_score += 1.0
+                result["key_insights"].append("价格与动量指标出现看涨背离")
+
+        if momentum["buying_climax"]:
+            momentum_score -= 1.0
+            result["key_insights"].append("检测到买入高潮，可能即将回调")
+        elif momentum["selling_climax"]:
+            momentum_score += 1.0
+            result["key_insights"].append("检测到卖出高潮，可能即将反弹")
+
+        score_components["momentum"] = momentum_score
+
+        # 9. 计算最终总分
+        result["overall_score"] = base_score
+        for component, score in score_components.items():
+            result["overall_score"] += score
+
+        # 确保在0-10范围内
+        result["overall_score"] = max(0, min(10, result["overall_score"]))
+
+        # 10. 看涨偏向得分: 0-10，5是中性
+        bullish_components = price_level_score + volume_score + structure_score + order_flow_score + pattern_score + momentum_score
+        result["bullish_bias_score"] = max(0, min(10, 5 + bullish_components / 2))
+
+        # 11. 结构可靠性评分
+        # 评估结构的清晰度和一致性
+        reliability_factors = []
+
+        # 价格水平清晰
+        if price_levels["nearest_support"] is not None and price_levels["nearest_resistance"] is not None:
+            reliability_factors.append(1.0)
+
+        # 成交量与价格方向一致
+        if (volume_profile["buying_pressure"] > 0.6 and result["bullish_bias_score"] > 5) or \
+                (volume_profile["selling_pressure"] > 0.6 and result["bullish_bias_score"] < 5):
+            reliability_factors.append(1.0)
+        else:
+            reliability_factors.append(-0.5)  # 成交量不支持价格方向
+
+        # 结构突破清晰
+        if structure_breaks["recent_structure_break"] and structure_breaks["validated_by_volume"]:
+            reliability_factors.append(1.0)
+
+        # 市场结构强度高
+        if abs(momentum["market_structure_strength"]) > 7:
+            reliability_factors.append(1.0)
+
+        # 无明显背离
+        if not momentum["momentum_divergence"]:
+            reliability_factors.append(0.5)
+        else:
+            reliability_factors.append(-1.0)  # 背离严重降低可靠性
+
+        # 计算可靠性得分: 0-10
+        if reliability_factors:
+            raw_reliability = sum(reliability_factors) / len(reliability_factors) * 2 + 5
+            result["structure_reliability"] = max(0, min(10, raw_reliability))
+        else:
+            result["structure_reliability"] = 5.0
+
+        # 12. 交易机会质量评分
+        # 结合偏向强度、可靠性和风险回报比
+        bullish_strength = abs(result["bullish_bias_score"] - 5) * 2  # 0-10，偏向强度
+
+        if bullish_strength > 4 and result["structure_reliability"] > 6:
+            result["opportunity_quality"] = min(10, (bullish_strength * 0.6 + result["structure_reliability"] * 0.4))
+        else:
+            result["opportunity_quality"] = min(10,
+                                                (bullish_strength * 0.3 + result["structure_reliability"] * 0.3) * 0.8)
+
+        # 13. 风险水平评估
+        if liquidity["liquidity_score"] < 3 or \
+                (len(order_flow["fake_breakouts"]) > 2 and order_flow["imbalance_ratio"] > 3):
+            result["risk_level"] = "high"
+        elif result["structure_reliability"] > 7 and abs(result["bullish_bias_score"] - 5) > 2:
+            result["risk_level"] = "low"
+        else:
+            result["risk_level"] = "medium"
+
+        return result
+
+    def _print_key_findings(self, result):
+        """打印关键发现"""
+        if not result.get("valid", False):
+            print_colored("⚠️ 市场结构分析无效或不完整", Colors.WARNING)
+            return
+
+        print_colored("\n===== 市场结构分析结果 =====", Colors.BLUE + Colors.BOLD)
+
+        # 显示总体评分
+        overall_score = result["structure_quality"]["overall_score"]
+        score_color = (
+            Colors.GREEN if overall_score >= 7 else
+            Colors.YELLOW if overall_score >= 5 else
+            Colors.RED
+        )
+        print_colored(f"市场结构质量评分: {score_color}{overall_score:.2f}/10{Colors.RESET}", Colors.INFO)
+
+        # 显示偏向分数
+        bias_score = result["structure_quality"]["bullish_bias_score"]
+        bias_text = "看涨" if bias_score > 5.5 else "看跌" if bias_score < 4.5 else "中性"
+        bias_strength = abs(bias_score - 5) * 20  # 0-100%
+        bias_color = (
+            Colors.GREEN if bias_score > 5.5 else
+            Colors.RED if bias_score < 4.5 else
+            Colors.RESET
+        )
+        print_colored(f"市场偏向: {bias_color}{bias_text}{Colors.RESET} ({bias_strength:.0f}% 强度)", Colors.INFO)
+
+        # 显示结构可靠性
+        reliability = result["structure_quality"]["structure_reliability"]
+        reliability_color = (
+            Colors.GREEN if reliability >= 7 else
+            Colors.YELLOW if reliability >= 5 else
+            Colors.RED
+        )
+        print_colored(f"结构可靠性: {reliability_color}{reliability:.2f}/10{Colors.RESET}", Colors.INFO)
+
+        # 显示交易机会质量
+        opportunity = result["structure_quality"]["opportunity_quality"]
+        opportunity_color = (
+            Colors.GREEN if opportunity >= 7 else
+            Colors.YELLOW if opportunity >= 5 else
+            Colors.RED
+        )
+        print_colored(f"交易机会质量: {opportunity_color}{opportunity:.2f}/10{Colors.RESET}", Colors.INFO)
+
+        # 显示价格水平
+        price_levels = result["price_levels"]
+        print_colored("\n关键价格水平:", Colors.BLUE)
+        if price_levels["nearest_resistance"]:
+            print_colored(f"  最近阻力位: {price_levels['nearest_resistance']:.6f}", Colors.INFO)
+        if price_levels["nearest_support"]:
+            print_colored(f"  最近支撑位: {price_levels['nearest_support']:.6f}", Colors.INFO)
+        if price_levels["fair_value_gap"]:
+            print_colored(f"  公平价值缺口: {price_levels['fair_value_gap']['price']:.6f}", Colors.INFO)
+
+        # 显示交易背景
+        print_colored("\n交易背景:", Colors.BLUE)
+        for context in result["structure_quality"]["trade_context"]:
+            print_colored(f"  • {context}", Colors.INFO)
+
+        # 显示关键洞察
+        if result["structure_quality"]["key_insights"]:
+            print_colored("\n关键洞察:", Colors.BLUE)
+            for insight in result["structure_quality"]["key_insights"]:
+                print_colored(f"  • {insight}", Colors.INFO)
+
+        # 显示风险水平
+        risk_level = result["structure_quality"]["risk_level"]
+        risk_color = (
+            Colors.RED if risk_level == "high" else
+            Colors.YELLOW if risk_level == "medium" else
+            Colors.GREEN
+        )
+        print_colored(f"\n风险水平: {risk_color}{risk_level}{Colors.RESET}", Colors.INFO)
+
+
+def detect_smart_money_movements(df: pd.DataFrame, volume_threshold: float = 2.0) -> Dict[str, Any]:
+    """
+    检测聪明资金移动的迹象
+
+    参数:
+        df: 价格和成交量数据
+        volume_threshold: 界定大额成交的阈值
+
+    返回:
+        包含聪明资金活动分析的字典
+    """
+    if df is None or len(df) < 30:
+        print_colored("⚠️ 数据不足，无法分析聪明资金活动", Colors.WARNING)
+        return {"valid": False, "error": "insufficient_data"}
+
+    result = {
+        "valid": True,
+        "accumulation_zones": [],
+        "distribution_zones": [],
+        "smart_money_activity": "neutral",
+        "confidence": 0.0,
+        "key_levels": [],
+        "recent_trend": None
+    }
+
+    try:
+        # 计算平均成交量和价格变动
+        avg_volume = df['volume'].mean()
+        price_changes = df['close'].pct_change().abs()
+        avg_price_change = price_changes.mean()
+
+        # 1. 寻找大成交量但价格变动不大的区域 - 可能的吸筹/出货
+        for i in range(5, len(df) - 5):
+            # 使用5天窗口
+            window = df.iloc[i - 5:i + 5]
+            price_range = (window['high'].max() - window['low'].min()) / window['close'].mean()
+            volume_sum = window['volume'].sum()
+            avg_vol_in_period = avg_volume * 10  # 10个周期的平均成交量
+
+            # 大成交量但价格范围小
+            if volume_sum > avg_vol_in_period * volume_threshold and price_range < avg_price_change * 5:
+                # 判断是吸筹还是出货
+                subsequent_price = df['close'].iloc[i + 5:i + 15].mean() if i + 15 < len(df) else df['close'].iloc[
+                                                                                                  i + 5:].mean()
+                prior_price = df['close'].iloc[i - 15:i - 5].mean()
+
+                if prior_price < df['close'].iloc[i] and subsequent_price > df['close'].iloc[i] * 1.03:
+                    # 价格在此之前较低，之后上涨 = 吸筹
+                    result["accumulation_zones"].append({
+                        "price": float(df['close'].iloc[i]),
+                        "volume_ratio": float(volume_sum / avg_vol_in_period),
+                        "index": i,
+                        "confidence": min(1.0, (volume_sum / avg_vol_in_period) / volume_threshold)
+                    })
+                elif prior_price > df['close'].iloc[i] and subsequent_price < df['close'].iloc[i] * 0.97:
+                    # 价格在此之前较高，之后下跌 = 出货
+                    result["distribution_zones"].append({
+                        "price": float(df['close'].iloc[i]),
+                        "volume_ratio": float(volume_sum / avg_vol_in_period),
+                        "index": i,
+                        "confidence": min(1.0, (volume_sum / avg_vol_in_period) / volume_threshold)
+                    })
+
+        # 2. 识别关键价格水平 - 聪明资金经常在这些水平交易
+        price_activity = {}
+        for i in range(10, len(df)):
+            # 将价格分为100个区间
+            price = df['close'].iloc[i]
+            price_bin = round(price, len(str(int(price))) - 1)  # 取整到合适的精度
+
+            if price_bin not in price_activity:
+                price_activity[price_bin] = {"volume": 0, "touches": 0}
+
+            price_activity[price_bin]["volume"] += df['volume'].iloc[i]
+            price_activity[price_bin]["touches"] += 1
+
+            high_activity_prices = []
+            for price, activity in price_activity.items():  # 正确的缩进
+                if activity["touches"] > 3 and activity["volume"] > avg_volume * 10:
+                    high_activity_prices.append({
+                        "price": float(price),
+                        "volume": float(activity["volume"]),
+                        "touches": activity["touches"]
+                    })
+        except Exception as e:
+        print_colored(f"❌ 检测聪明资金活动失败: {e}", Colors.ERROR)
+        return {"valid": False, "error": str(e)}
+
+    # 3. 基于近期活动判断总体趋势
+    if len(df) >= 20:
+        recent_df = df.tail(20)
+        up_days = sum(
+            1 for i in range(1, len(recent_df)) if recent_df['close'].iloc[i] > recent_df['close'].iloc[i - 1])
+        down_days = 20 - up_days
+
+        if up_days >= 14:  # 超过70%为上涨日
+            result["recent_trend"] = "bullish"
+        elif down_days >= 14:  # 超过70%为下跌日
+            result["recent_trend"] = "bearish"
+        else:
+            result["recent_trend"] = "neutral"
+
+    # 4. 综合分析，判断聪明资金活动
+    acc_confidence = sum(zone["confidence"] for zone in result["accumulation_zones"]) if result[
+        "accumulation_zones"] else 0
+    dist_confidence = sum(zone["confidence"] for zone in result["distribution_zones"]) if result[
+        "distribution_zones"] else 0
+
+    if len(result["accumulation_zones"]) > len(result["distribution_zones"]) and acc_confidence > 1.0:
+        result["smart_money_activity"] = "accumulation"
+        result["confidence"] = min(1.0, acc_confidence / 3)
+    elif len(result["distribution_zones"]) > len(result["accumulation_zones"]) and dist_confidence > 1.0:
+        result["smart_money_activity"] = "distribution"
+        result["confidence"] = min(1.0, dist_confidence / 3)
+    else:
+        result["smart_money_activity"] = "neutral"
+        result["confidence"] = 0.3  # 默认低置信度
+
+    # 5. 考虑近期趋势修正
+    if result["recent_trend"] == "bullish" and result["smart_money_activity"] == "accumulation":
+        result["confidence"] *= 1.2  # 趋势确认，提高置信度
+    elif result["recent_trend"] == "bearish" and result["smart_money_activity"] == "distribution":
+        result["confidence"] *= 1.2  # 趋势确认，提高置信度
+    elif result["recent_trend"] == "bullish" and result["smart_money_activity"] == "distribution":
+        result["confidence"] *= 0.8  # 趋势不确认，降低置信度
+    elif result["recent_trend"] == "bearish" and result["smart_money_activity"] == "accumulation":
+        result["confidence"] *= 0.8  # 趋势不确认，降低置信度
+
+    # 打印结果
+    if result["smart_money_activity"] != "neutral":
+        activity_color = Colors.GREEN if result["smart_money_activity"] == "accumulation" else Colors.RED
+        print_colored(
+            f"检测到聪明资金{activity_color}{result['smart_money_activity']}{Colors.RESET}行为，"
+            f"置信度: {result['confidence']:.2f}",
+            Colors.INFO
+        )
+
+        if result["accumulation_zones"]:
+            print_colored(f"吸筹区域: {len(result['accumulation_zones'])}个", Colors.INFO)
+            for i, zone in enumerate(
+                    sorted(result["accumulation_zones"], key=lambda x: x["confidence"], reverse=True)[:3]):
+                print_colored(f"  {i + 1}. 价格: {zone['price']:.6f}, 置信度: {zone['confidence']:.2f}", Colors.INFO)
+
+        if result["distribution_zones"]:
+            print_colored(f"出货区域: {len(result['distribution_zones'])}个", Colors.INFO)
+            for i, zone in enumerate(
+                    sorted(result["distribution_zones"], key=lambda x: x["confidence"], reverse=True)[:3]):
+                print_colored(f"  {i + 1}. 价格: {zone['price']:.6f}, 置信度: {zone['confidence']:.2f}", Colors.INFO)
+
+    else:
+        print_colored("未检测到明显的聪明资金活动", Colors.INFO)
+
+    return result
+
+except Exception as e:
+print_colored(f"❌ 检测聪明资金活动失败: {e}", Colors.ERROR)
+return {"valid": False, "error": str(e)}
+
+
+def analyze_order_blocks(df: pd.DataFrame, look_back: int = 50) -> Dict[str, Any]:
+    """
+    分析订单块（Order Blocks）- 大额成交但价格变动小的关键区域
+
+    参数:
+        df: 价格和成交量数据
+        look_back: 回溯分析的K线数量
+
+    返回:
+        包含订单块分析的字典
+    """
+    if df is None or len(df) < look_back:
+        print_colored("⚠️ 数据不足，无法分析订单块", Colors.WARNING)
+        return {"valid": False, "error": "insufficient_data"}
+
+    result = {
+        "valid": True,
+        "buy_order_blocks": [],  # 多头订单块
+        "sell_order_blocks": [],  # 空头订单块
+        "active_blocks": [],  # 当前活跃的订单块
+        "recently_tested": [],  # 最近被测试的订单块
+        "next_key_level": None  # 下一个可能的关键水平
+    }
+
+    try:
+        recent_df = df.tail(look_back).copy()
+        recent_df['body_size'] = abs(recent_df['close'] - recent_df['open'])
+        recent_df['candle_range'] = recent_df['high'] - recent_df['low']
+        recent_df['rel_body_size'] = recent_df['body_size'] / recent_df['candle_range']
+        recent_df['rel_volume'] = recent_df['volume'] / recent_df['volume'].rolling(10).mean()
+
+        current_price = recent_df['close'].iloc[-1]
+
+        # 遍历K线寻找潜在的订单块
+        for i in range(5, len(recent_df) - 5):
+            # 判断是否为熊市订单块前的大阳线
+            if (recent_df['close'].iloc[i] > recent_df['open'].iloc[i] and  # 阳线
+                    recent_df['body_size'].iloc[i] > recent_df['body_size'].iloc[i - 5:i].mean() * 1.5 and  # 大实体
+                    recent_df['rel_volume'].iloc[i] > 1.2):  # 放量
+
+                # 之后有明显下跌
+                next_move = recent_df['close'].iloc[i + 1:i + 6].min() - recent_df['close'].iloc[i]
+                if next_move < 0 and abs(next_move) / recent_df['close'].iloc[i] > 0.01:  # 至少1%下跌
+                    # 这是一个卖出订单块
+                    block_top = recent_df['high'].iloc[i]
+                    block_bottom = recent_df['close'].iloc[i]
+
+                    # 寻找反应下跌的最低点
+                    reaction_index = i
+                    for j in range(i + 1, min(i + 10, len(recent_df))):
+                        if recent_df['low'].iloc[j] < recent_df['low'].iloc[reaction_index]:
+                            reaction_index = j
+
+                    # 计算从反应到现在是否被测试过
+                    tested = False
+                    tested_price = None
+                    for j in range(reaction_index, len(recent_df)):
+                        if recent_df['high'].iloc[j] >= block_bottom:
+                            tested = True
+                            tested_price = recent_df['close'].iloc[j]
+                            break
+
+                    # 记录卖出订单块
+                    result["sell_order_blocks"].append({
+                        "top": float(block_top),
+                        "bottom": float(block_bottom),
+                        "index": i,
+                        "tested": tested,
+                        "tested_price": float(tested_price) if tested_price is not None else None,
+                        "volume_ratio": float(recent_df['rel_volume'].iloc[i]),
+                        "active": block_bottom <= current_price <= block_top  # 价格是否在区块内
+                    })
+
+            # 判断是否为牛市订单块前的大阴线
+            if (recent_df['close'].iloc[i] < recent_df['open'].iloc[i] and  # 阴线
+                    recent_df['body_size'].iloc[i] > recent_df['body_size'].iloc[i - 5:i].mean() * 1.5 and  # 大实体
+                    recent_df['rel_volume'].iloc[i] > 1.2):  # 放量
+
+                # 之后有明显上涨
+                next_move = recent_df['close'].iloc[i + 1:i + 6].max() - recent_df['close'].iloc[i]
+                if next_move > 0 and next_move / recent_df['close'].iloc[i] > 0.01:  # 至少1%上涨
+                    # 这是一个买入订单块
+                    block_top = recent_df['open'].iloc[i]
+                    block_bottom = recent_df['low'].iloc[i]
+
+                    # 寻找反应上涨的最高点
+                    reaction_index = i
+                    for j in range(i + 1, min(i + 10, len(recent_df))):
+                        if recent_df['high'].iloc[j] > recent_df['high'].iloc[reaction_index]:
+                            reaction_index = j
+
+                    # 计算从反应到现在是否被测试过
+                    tested = False
+                    tested_price = None
+                    for j in range(reaction_index, len(recent_df)):
+                        if recent_df['low'].iloc[j] <= block_top:
+                            tested = True
+                            tested_price = recent_df['close'].iloc[j]
+                            break
+
+                    # 记录买入订单块
+                    result["buy_order_blocks"].append({
+                        "top": float(block_top),
+                        "bottom": float(block_bottom),
+                        "index": i,
+                        "tested": tested,
+                        "tested_price": float(tested_price) if tested_price is not None else None,
+                        "volume_ratio": float(recent_df['rel_volume'].iloc[i]),
+                        "active": block_bottom <= current_price <= block_top  # 价格是否在区块内
+                    })
+
+        # 找出当前活跃的订单块
+        for block in result["buy_order_blocks"]:
+            if block["active"]:
+                result["active_blocks"].append({
+                    "type": "buy",
+                    "top": block["top"],
+                    "bottom": block["bottom"],
+                    "volume_ratio": block["volume_ratio"]
+                })
+
+        for block in result["sell_order_blocks"]:
+            if block["active"]:
+                result["active_blocks"].append({
+                    "type": "sell",
+                    "top": block["top"],
+                    "bottom": block["bottom"],
+                    "volume_ratio": block["volume_ratio"]
+                })
+
+        # 找出最近被测试的订单块
+        for block in result["buy_order_blocks"]:
+            if block["tested"] and len(recent_df) - block["index"] < 20:  # 最近20个周期内被测试
+                result["recently_tested"].append({
+                    "type": "buy",
+                    "top": block["top"],
+                    "bottom": block["bottom"],
+                    "tested_price": block["tested_price"],
+                    "test_success": block["tested_price"] > block["top"] if block["tested_price"] is not None else False
+                })
+
+        for block in result["sell_order_blocks"]:
+            if block["tested"] and len(recent_df) - block["index"] < 20:  # 最近20个周期内被测试
+                result["recently_tested"].append({
+                    "type": "sell",
+                    "top": block["top"],
+                    "bottom": block["bottom"],
+                    "tested_price": block["tested_price"],
+                    "test_success": block["tested_price"] < block["bottom"] if block[
+                                                                                   "tested_price"] is not None else False
+                })
+
+        # 预测下一个关键水平
+        if result["buy_order_blocks"]:
+            # 筛选当前价格之下的买入订单块
+            lower_blocks = [b for b in result["buy_order_blocks"] if b["top"] < current_price]
+            if lower_blocks:
+                # 取最近的一个
+                closest_block = max(lower_blocks, key=lambda x: x["index"])
+                result["next_key_level"] = {
+                    "type": "support",
+                    "price": float(closest_block["top"]),
+                    "confidence": float(min(1.0, closest_block["volume_ratio"] / 2))
+                }
+
+        if result["sell_order_blocks"] and not result["next_key_level"]:
+            # 筛选当前价格之上的卖出订单块
+            upper_blocks = [b for b in result["sell_order_blocks"] if b["bottom"] > current_price]
+            if upper_blocks:
+                # 取最近的一个
+                closest_block = max(upper_blocks, key=lambda x: x["index"])
+                result["next_key_level"] = {
+                    "type": "resistance",
+                    "price": float(closest_block["bottom"]),
+                    "confidence": float(min(1.0, closest_block["volume_ratio"] / 2))
+                }
+
+        # 打印分析结果
+        print_colored(f"\n===== 订单块分析 =====", Colors.BLUE + Colors.BOLD)
+        print_colored(f"买入订单块: {len(result['buy_order_blocks'])}个", Colors.INFO)
+        print_colored(f"卖出订单块: {len(result['sell_order_blocks'])}个", Colors.INFO)
+
+        if result["active_blocks"]:
+            print_colored(f"当前活跃订单块: {len(result['active_blocks'])}个", Colors.INFO)
+            for i, block in enumerate(result["active_blocks"]):
+                block_color = Colors.GREEN if block["type"] == "buy" else Colors.RED
+                print_colored(
+                    f"  {i + 1}. {block_color}{block['type']}{Colors.RESET} 区块: "
+                    f"{block['bottom']:.6f} - {block['top']:.6f}, "
+                    f"成交量比率: {block['volume_ratio']:.2f}",
+                    Colors.INFO
+                )
+
+        if result["next_key_level"]:
+            key_level = result["next_key_level"]
+            level_color = Colors.GREEN if key_level["type"] == "support" else Colors.RED
+            print_colored(
+                f"下一个关键水平: {level_color}{key_level['type']}{Colors.RESET} @ "
+                f"{key_level['price']:.6f}, 置信度: {key_level['confidence']:.2f}",
+                Colors.INFO
+            )
+
+        return result
+
+    except Exception as e:
+        print_colored(f"❌ 分析订单块失败: {e}", Colors.ERROR)
+        return {"valid": False, "error": str(e)}
+
+
+def analyze_fair_value_gaps(df: pd.DataFrame, gap_threshold: float = 0.003) -> Dict[str, Any]:
+    """
+    分析公平价值缺口(FVG) - 价格跳空留下的未成交区域
+
+    参数:
+        df: 价格数据
+        gap_threshold: 判定缺口的最小阈值(相对于价格)
+
+    返回:
+        包含FVG分析的字典
+    """
+    if df is None or len(df) < 20:
+        print_colored("⚠️ 数据不足，无法分析公平价值缺口", Colors.WARNING)
+        return {"valid": False, "error": "insufficient_data"}
+
+    result = {
+        "valid": True,
+        "bullish_fvgs": [],  # 看涨缺口
+        "bearish_fvgs": [],  # 看跌缺口
+        "filled_gaps": [],  # 已填补的缺口
+        "active_gaps": [],  # 未填补的活跃缺口
+        "key_insights": []
+    }
+
+    try:
+        current_price = df['close'].iloc[-1]
+
+        # 寻找缺口
+        for i in range(2, len(df) - 1):
+            # 寻找看涨缺口: 当前K线的低点高于前一K线的高点
+            if df['low'].iloc[i] > df['high'].iloc[i - 1]:
+                gap_size = df['low'].iloc[i] - df['high'].iloc[i - 1]
+                gap_mid = df['high'].iloc[i - 1] + gap_size / 2
+
+                # 只记录足够大的缺口
+                if gap_size / gap_mid > gap_threshold:
+                    # 检查是否已经填补
+                    filled = False
+                    fill_price = None
+                    fill_index = None
+
+                    for j in range(i + 1, len(df)):
+                        if df['low'].iloc[j] <= df['high'].iloc[i - 1]:
+                            filled = True
+                            fill_price = df['close'].iloc[j]
+                            fill_index = j
+                            break
+
+                    fvg = {
+                        "top": float(df['low'].iloc[i]),
+                        "bottom": float(df['high'].iloc[i - 1]),
+                        "mid": float(gap_mid),
+                        "size": float(gap_size),
+                        "index": i,
+                        "filled": filled,
+                        "fill_price": float(fill_price) if fill_price is not None else None,
+                        "fill_index": fill_index,
+                        "active": not filled and (df['high'].iloc[i - 1] < current_price < df['low'].iloc[i])
+                    }
+
+                    result["bullish_fvgs"].append(fvg)
+
+                    if filled:
+                        result["filled_gaps"].append({
+                            "type": "bullish",
+                            "top": fvg["top"],
+                            "bottom": fvg["bottom"],
+                            "fill_price": fvg["fill_price"]
+                        })
+                    elif fvg["active"]:
+                        result["active_gaps"].append({
+                            "type": "bullish",
+                            "top": fvg["top"],
+                            "bottom": fvg["bottom"],
+                            "mid": fvg["mid"]
+                        })
+
+            # 寻找看跌缺口: 当前K线的高点低于前一K线的低点
+            if df['high'].iloc[i] < df['low'].iloc[i - 1]:
+                gap_size = df['low'].iloc[i - 1] - df['high'].iloc[i]
+                gap_mid = df['high'].iloc[i] + gap_size / 2
+
+                # 只记录足够大的缺口
+                if gap_size / gap_mid > gap_threshold:
+                    # 检查是否已经填补
+                    filled = False
+                    fill_price = None
+                    fill_index = None
+
+                    for j in range(i + 1, len(df)):
+                        if df['high'].iloc[j] >= df['low'].iloc[i - 1]:
+                            filled = True
+                            fill_price = df['close'].iloc[j]
+                            fill_index = j
+                            break
+
+                    fvg = {
+                        "top": float(df['low'].iloc[i - 1]),
+                        "bottom": float(df['high'].iloc[i]),
+                        "mid": float(gap_mid),
+                        "size": float(gap_size),
+                        "index": i,
+                        "filled": filled,
+                        "fill_price": float(fill_price) if fill_price is not None else None,
+                        "fill_index": fill_index,
+                        "active": not filled and (df['high'].iloc[i] < current_price < df['low'].iloc[i - 1])
+                    }
+
+                    result["bearish_fvgs"].append(fvg)
+
+                    if filled:
+                        result["filled_gaps"].append({
+                            "type": "bearish",
+                            "top": fvg["top"],
+                            "bottom": fvg["bottom"],
+                            "fill_price": fvg["fill_price"]
+                        })
+                    elif fvg["active"]:
+                        result["active_gaps"].append({
+                            "type": "bearish",
+                            "top": fvg["top"],
+                            "bottom": fvg["bottom"],
+                            "mid": fvg["mid"]
+                        })
+
+        # 洞察分析
+        if result["bullish_fvgs"] and not any(fvg["filled"] for fvg in result["bullish_fvgs"][-3:]):
+            result["key_insights"].append("最近的看涨缺口尚未被填补，市场可能保持看涨")
+
+        if result["bearish_fvgs"] and not any(fvg["filled"] for fvg in result["bearish_fvgs"][-3:]):
+            result["key_insights"].append("最近的看跌缺口尚未被填补，市场可能保持看跌")
+
+        # 分析价格在缺口中的位置
+        active_bullish_fvgs = [fvg for fvg in result["bullish_fvgs"] if not fvg["filled"]]
+        active_bearish_fvgs = [fvg for fvg in result["bearish_fvgs"] if not fvg["filled"]]
+
+        if active_bullish_fvgs:
+            # 找出价格下方最近的看涨缺口
+            lower_bullish_fvgs = [fvg for fvg in active_bullish_fvgs if fvg["top"] < current_price]
+            if lower_bullish_fvgs:
+                closest = max(lower_bullish_fvgs, key=lambda x: x["index"])
+                distance = (current_price - closest["top"]) / current_price
+                if distance < 0.02:  # 2%以内
+                    result["key_insights"].append(f"价格接近下方看涨缺口顶部，可能提供支撑")
+
+        if active_bearish_fvgs:
+            # 找出价格上方最近的看跌缺口
+            upper_bearish_fvgs = [fvg for fvg in active_bearish_fvgs if fvg["bottom"] > current_price]
+            if upper_bearish_fvgs:
+                closest = max(upper_bearish_fvgs, key=lambda x: x["index"])
+                distance = (closest["bottom"] - current_price) / current_price
+                if distance < 0.02:  # 2%以内
+                    result["key_insights"].append(f"价格接近上方看跌缺口底部，可能遇到阻力")
+
+        # 查找缺口密集区域 - 多个缺口在相近价位，强化支撑/阻力
+        if len(active_bullish_fvgs) >= 2:
+            # 按价格排序
+            sorted_bullish = sorted(active_bullish_fvgs, key=lambda x: x["mid"])
+            for i in range(len(sorted_bullish) - 1):
+                if abs(sorted_bullish[i]["mid"] - sorted_bullish[i + 1]["mid"]) / sorted_bullish[i][
+                    "mid"] < 0.01:  # 1%以内
+                    result["key_insights"].append(
+                        f"检测到看涨缺口密集区域在 {sorted_bullish[i]['mid']:.6f} 附近，形成强支撑")
+                    break
+
+        if len(active_bearish_fvgs) >= 2:
+            # 按价格排序
+            sorted_bearish = sorted(active_bearish_fvgs, key=lambda x: x["mid"])
+            for i in range(len(sorted_bearish) - 1):
+                if abs(sorted_bearish[i]["mid"] - sorted_bearish[i + 1]["mid"]) / sorted_bearish[i][
+                    "mid"] < 0.01:  # 1%以内
+                    result["key_insights"].append(
+                        f"检测到看跌缺口密集区域在 {sorted_bearish[i]['mid']:.6f} 附近，形成强阻力")
+                    break
+
+        # 打印结果
+        print_colored(f"\n===== 公平价值缺口分析 =====", Colors.BLUE + Colors.BOLD)
+        print_colored(f"看涨缺口: {len(result['bullish_fvgs'])}个, 看跌缺口: {len(result['bearish_fvgs'])}个",
+                      Colors.INFO)
+
+        if result["active_gaps"]:
+            print_colored(f"活跃未填补缺口: {len(result['active_gaps'])}个", Colors.INFO)
+            for i, gap in enumerate(result["active_gaps"]):
+                gap_color = Colors.GREEN if gap["type"] == "bullish" else Colors.RED
+                print_colored(
+                    f"  {i + 1}. {gap_color}{gap['type']}{Colors.RESET} 缺口: "
+                    f"{gap['bottom']:.6f} - {gap['top']:.6f}",
+                    Colors.INFO
+                )
+
+        if result["key_insights"]:
+            print_colored(f"关键洞察:", Colors.BLUE)
+            for insight in result["key_insights"]:
+                print_colored(f"  • {insight}", Colors.INFO)
+
+        return result
+
+    except Exception as e:
+        print_colored(f"❌ 分析公平价值缺口失败: {e}", Colors.ERROR)
+        return {"valid": False, "error": str(e)}
+
+
+def integrate_market_structure(df: pd.DataFrame, current_price: float = None) -> Dict[str, Any]:
+    """
+    整合所有市场结构分析以提供综合视角
+
+    参数:
+        df: 价格数据
+        current_price: 当前价格(可选)
+
+    返回:
+        包含完整市场结构分析的字典
+    """
+    if df is None or len(df) < 50:
+        print_colored("⚠️ 数据不足，无法进行市场结构综合分析", Colors.WARNING)
+        return {"valid": False, "error": "insufficient_data"}
+
+    if current_price is None:
+        current_price = df['close'].iloc[-1]
+
+    # 创建市场结构分析器
+    analyzer = MarketStructureAnalyzer(lookback_window=50)
+
+    # 进行基础市场结构分析
+    base_analysis = analyzer.analyze(df, current_price)
+
+    if not base_analysis.get("valid", False):
+        return base_analysis
+
+    # 进行聪明资金分析
+    smart_money = detect_smart_money_movements(df)
+
+    # 进行订单块分析
+    order_blocks = analyze_order_blocks(df)
+
+    # 进行公平价值缺口分析
+    fvg_analysis = analyze_fair_value_gaps(df)
+
+    # 整合所有分析
+    result = {
+        "valid": True,
+        "current_price": current_price,
+        "base_structure": base_analysis,
+        "smart_money": smart_money,
+        "order_blocks": order_blocks,
+        "fair_value_gaps": fvg_analysis,
+        "composite_score": 0.0,
+        "market_bias": "neutral",
+        "key_levels": [],
+        "opportunity_score": 0.0,
+        "major_insights": []
+    }
+
+    # 计算综合得分
+    try:
+        # 基础结构得分 (0-10)
+        base_score = base_analysis["structure_quality"]["overall_score"]
+
+        # 聪明资金活动修正
+        sm_adjustment = 0.0
+        if smart_money.get("valid", False):
+            sm_activity = smart_money.get("smart_money_activity", "neutral")
+            sm_confidence = smart_money.get("confidence", 0.0)
+
+            if sm_activity == "accumulation":
+                sm_adjustment = 1.0 * sm_confidence
+            elif sm_activity == "distribution":
+                sm_adjustment = -1.0 * sm_confidence
+
+        # 订单块修正
+        ob_adjustment = 0.0
+        if order_blocks.get("valid", False):
+            active_buy_blocks = len([b for b in order_blocks.get("active_blocks", []) if b.get("type") == "buy"])
+            active_sell_blocks = len([b for b in order_blocks.get("active_blocks", []) if b.get("type") == "sell"])
+
+            if active_buy_blocks > active_sell_blocks:
+                ob_adjustment = 0.5
+            elif active_sell_blocks > active_buy_blocks:
+                ob_adjustment = -0.5
+
+            # 考虑下一个关键水平
+            next_level = order_blocks.get("next_key_level", None)
+            if next_level:
+                if next_level.get("type") == "support" and next_level.get("confidence", 0) > 0.7:
+                    ob_adjustment += 0.3
+                elif next_level.get("type") == "resistance" and next_level.get("confidence", 0) > 0.7:
+                    ob_adjustment -= 0.3
+
+        # 公平价值缺口修正
+        fvg_adjustment = 0.0
+        if fvg_analysis.get("valid", False):
+            active_gaps = fvg_analysis.get("active_gaps", [])
+            bullish_gaps = len([g for g in active_gaps if g.get("type") == "bullish"])
+            bearish_gaps = len([g for g in active_gaps if g.get("type") == "bearish"])
+
+            if bullish_gaps > bearish_gaps:
+                fvg_adjustment = 0.5
+            elif bearish_gaps > bullish_gaps:
+                fvg_adjustment = -0.5
+
+        # 计算综合得分 (0-10)
+        composite_score = base_score + sm_adjustment + ob_adjustment + fvg_adjustment
+        composite_score = max(0, min(10, composite_score))  # 限制在0-10范围内
+
+        # 确定市场偏向
+        if composite_score >= 6.5:
+            market_bias = "bullish"
+        elif composite_score <= 3.5:
+            market_bias = "bearish"
+        else:
+            market_bias = "neutral"
+
+        result["composite_score"] = composite_score
+        result["market_bias"] = market_bias
+
+        # 收集关键价格水平
+        key_levels = []
+
+        # 从基础分析中提取支撑和阻力位
+        if base_analysis["price_levels"]["nearest_support"] is not None:
+            key_levels.append({
+                "price": base_analysis["price_levels"]["nearest_support"],
+                "type": "support",
+                "source": "base_analysis",
+                "strength": base_analysis["price_levels"].get("key_level_strength", {}).get(
+                    str(base_analysis["price_levels"]["nearest_support"]), 1.0)
+            })
+
+        if base_analysis["price_levels"]["nearest_resistance"] is not None:
+            key_levels.append({
+                "price": base_analysis["price_levels"]["nearest_resistance"],
+                "type": "resistance",
+                "source": "base_analysis",
+                "strength": base_analysis["price_levels"].get("key_level_strength", {}).get(
+                    str(base_analysis["price_levels"]["nearest_resistance"]), 1.0)
+            })
+
+        # 从订单块分析中提取关键水平
+        if order_blocks.get("valid", False) and order_blocks.get("next_key_level") is not None:
+            next_level = order_blocks["next_key_level"]
+            key_levels.append({
+                "price": next_level["price"],
+                "type": next_level["type"],
+                "source": "order_blocks",
+                "strength": next_level.get("confidence", 0.5) * 2  # 转换为1-10范围
+            })
+
+        # 从公平价值缺口中提取关键水平
+        if fvg_analysis.get("valid", False):
+            for gap in fvg_analysis.get("active_gaps", [])[:2]:  # 只取最近的两个
+                key_levels.append({
+                    "price": gap["mid"],
+                    "type": "support" if gap["type"] == "bullish" else "resistance",
+                    "source": "fvg",
+                    "strength": 3.0  # 默认中等强度
+                })
+
+        # 合并相近的水平
+        merged_levels = []
+        key_levels.sort(key=lambda x: x["price"])
+
+        i = 0
+        while i < len(key_levels):
+            current = key_levels[i]
+            j = i + 1
+            same_group = [current]
+
+            # 检查是否有相近的水平 (1%以内)
+            while j < len(key_levels) and abs(key_levels[j]["price"] - current["price"]) / current["price"] < 0.01:
+                same_group.append(key_levels[j])
+                j += 1
+
+            if len(same_group) > 1:
+                # 合并相近水平
+                avg_price = sum(l["price"] for l in same_group) / len(same_group)
+                avg_strength = sum(l.get("strength", 1.0) for l in same_group) / len(same_group)
+
+                # 确定类型 (支撑/阻力)
+                support_count = sum(1 for l in same_group if l["type"] == "support")
+                resistance_count = len(same_group) - support_count
+                type_value = "support" if support_count >= resistance_count else "resistance"
+
+                merged_levels.append({
+                    "price": avg_price,
+                    "type": type_value,
+                    "source": "merged",
+                    "strength": avg_strength + len(same_group) - 1  # 相同水平叠加增加强度
+                })
+
+                i = j
+            else:
+                merged_levels.append(current)
+                i += 1
+
+        # 排序并限制数量
+        result["key_levels"] = sorted(merged_levels, key=lambda x: x["strength"], reverse=True)[:5]
+
+        # 计算交易机会评分
+        opportunity_score = 0.0
+
+        # 基于综合评分
+        if composite_score >= 7.5 or composite_score <= 2.5:
+            opportunity_score += 3.0  # 强烈的偏向提高机会评分
+
+        # 基于关键水平的位置
+        price_near_level = False
+        for level in result["key_levels"]:
+            distance = abs(current_price - level["price"]) / current_price
+            if distance < 0.01:  # 1%以内
+                price_near_level = True
+                if level["type"] == "support" and current_price > level["price"]:
+                    # 价格在支撑位上方
+                    opportunity_score += 2.0 * (level["strength"] / 10)
+                elif level["type"] == "resistance" and current_price < level["price"]:
+                    # 价格在阻力位下方
+                    opportunity_score += 2.0 * (level["strength"] / 10)
+
+        if price_near_level:
+            result["major_insights"].append("价格接近关键水平，提供交易机会")
+
+        # 基于结构形态
+        if base_analysis["structure_breaks"]["recent_structure_break"] is not None:
+            break_type = base_analysis["structure_breaks"]["recent_structure_break"]["type"]
+            if break_type == "resistance" and market_bias == "bullish":
+                opportunity_score += 2.0
+                result["major_insights"].append("价格突破阻力位，且整体偏向看涨，提供良好入场机会")
+            elif break_type == "support" and market_bias == "bearish":
+                opportunity_score += 2.0
+                result["major_insights"].append("价格跌破支撑位，且整体偏向看跌，提供良好入场机会")
+
+        # 基于市场结构可靠性
+        structure_reliability = base_analysis["structure_quality"]["structure_reliability"]
+        opportunity_score += (structure_reliability - 5) / 2.5  # 转换为-2到+2范围
+
+        # 确保最终评分在0-10范围内
+        result["opportunity_score"] = max(0, min(10, opportunity_score))
+
+        # 收集主要洞察点
+        base_insights = base_analysis["structure_quality"].get("key_insights", [])
+        sm_insights = [f"检测到聪明资金{smart_money.get('smart_money_activity', 'neutral')}行为"] if smart_money.get(
+            "valid", True) and smart_money.get("smart_money_activity", "neutral") != "neutral" else []
+        fvg_insights = fvg_analysis.get("key_insights", []) if fvg_analysis.get("valid", True) else []
+
+        # 整合洞察
+        result["major_insights"].extend(base_insights)
+        result["major_insights"].extend(sm_insights)
+        result["major_insights"].extend(fvg_insights)
+
+        # 添加综合洞察
+        if market_bias == "bullish" and result["opportunity_score"] >= 7:
+            result["major_insights"].append("市场结构强烈看涨，建议寻找做多机会")
+        elif market_bias == "bearish" and result["opportunity_score"] >= 7:
+            result["major_insights"].append("市场结构强烈看跌，建议寻找做空机会")
+        elif market_bias != "neutral" and price_near_level:
+            result["major_insights"].append(
+                f"价格在关键{('支撑' if market_bias == 'bullish' else '阻力')}位附近，提供良好的风险回报比")
+
+        # 移除重复洞察
+        result["major_insights"] = list(set(result["major_insights"]))
+
+        # 打印综合结果
+        print_colored(f"\n===== 市场结构综合分析 =====", Colors.BLUE + Colors.BOLD)
+
+        score_color = (
+            Colors.GREEN if composite_score >= 6.5 else
+            Colors.RED if composite_score <= 3.5 else
+            Colors.YELLOW
+        )
+
+        print_colored(f"综合评分: {score_color}{composite_score:.2f}/10{Colors.RESET}", Colors.INFO)
+        print_colored(f"市场偏向: {score_color}{market_bias}{Colors.RESET}", Colors.INFO)
+        print_colored(f"交易机会评分: {score_color}{result['opportunity_score']:.2f}/10{Colors.RESET}", Colors.INFO)
+
+        if result["key_levels"]:
+            print_colored(f"\n关键价格水平:", Colors.BLUE)
+            for i, level in enumerate(result["key_levels"]):
+                level_color = Colors.GREEN if level["type"] == "support" else Colors.RED
+                print_colored(
+                    f"  {i + 1}. {level_color}{level['type']}{Colors.RESET} @ {level['price']:.6f}, "
+                    f"强度: {level['strength']:.1f}/10, 来源: {level['source']}",
+                    Colors.INFO
+                )
+
+        if result["major_insights"]:
+            print_colored(f"\n主要洞察:", Colors.BLUE)
+            for i, insight in enumerate(result["major_insights"]):
+                print_colored(f"  {i + 1}. {insight}", Colors.INFO)
+
+        return result
+
+    except Exception as e:
+        print_colored(f"❌ 市场结构综合分析失败: {e}", Colors.ERROR)
+        import traceback
+        print_colored(traceback.format_exc(), Colors.ERROR)
+        return {"valid": False, "error": str(e)}
