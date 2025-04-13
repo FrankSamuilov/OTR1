@@ -25,7 +25,7 @@ import datetime
 import time
 from integration_module import calculate_enhanced_indicators, generate_trade_recommendation
 from multi_timeframe_module import MultiTimeframeCoordinator
-
+from EntryWaitingManager import EntryWaitingManager
 # 导入集成模块（这是最简单的方法，因为它整合了所有其他模块的功能）
 from integration_module import (
     calculate_enhanced_indicators,
@@ -56,10 +56,11 @@ class EnhancedTradingBot:
         self.similar_patterns_history = {}  # 存储相似模式历史
         self.hedge_mode_enabled = True  # 默认启用双向持仓
         self.dynamic_take_profit = 0.025  # 默认2.5%止盈
-        self.dynamic_stop_loss = -0.0175  # 默认1.75%止损
+        self.dynamic_stop_loss = -0.02  # 默认2.0%止损
         self.market_bias = "neutral"  # 市场偏向：bullish/bearish/neutral
         self.trend_priority = False  # 是否优先考虑趋势明确的交易对
         self.strong_trend_symbols = []  # 趋势明确的交易对列表
+        self.entry_manager = EntryWaitingManager(self)
         # 多时间框架协调器初始化
         self.mtf_coordinator = MultiTimeframeCoordinator(self.client, self.logger)
         print("✅ 多时间框架协调器初始化完成")
@@ -127,7 +128,7 @@ class EnhancedTradingBot:
 
             # 使用持仓记录的个性化止盈止损设置，而不是全局默认值
             take_profit = pos.get("dynamic_take_profit", 0.025)  # 使用持仓特定的止盈值，默认2.5%
-            stop_loss = pos.get("stop_loss", -0.0175)  # 使用持仓特定的止损值，默认-1.75%
+            stop_loss = pos.get("stop_loss", -0.02)  # 使用持仓特定的止损值，默认-1.75%
 
             profit_color = Colors.GREEN if profit_pct >= 0 else Colors.RED
             print(
@@ -279,7 +280,7 @@ class EnhancedTradingBot:
 
                     # 使用持仓特定的止盈止损设置，而不是全局默认值
                     take_profit = pos.get("dynamic_take_profit", 0.025)  # 默认2.5%
-                    stop_loss = pos.get("stop_loss", -0.0175)  # 默认-1.75%
+                    stop_loss = pos.get("stop_loss", -0.02)  # 默认-1.75%
 
                     # 日志记录当前状态
                     if check_interval % 60 == 0:  # 每分钟记录一次
@@ -737,7 +738,7 @@ class EnhancedTradingBot:
         else:
             # 正常波动环境，恢复默认值
             self.dynamic_take_profit = 0.025  # 恢复默认2.5%
-            self.dynamic_stop_loss = -0.0175  # 恢复默认1.75%
+            self.dynamic_stop_loss = -0.02  # 恢复默认1.75%
             print(f"ℹ️ 市场波动性正常，使用默认止盈止损")
 
             # 记录使用默认值
@@ -1533,7 +1534,7 @@ class EnhancedTradingBot:
             # ==== 动态止盈止损计算 ====
             # 默认止盈止损
             take_profit = 0.025  # 默认2.5%止盈
-            stop_loss = -0.0175  # 默认1.75%止损
+            stop_loss = -0.02  # 默认1.75%止损
 
             # 根据预测幅度调整止盈止损
             if expected_movement >= 12.0:
@@ -1549,7 +1550,7 @@ class EnhancedTradingBot:
                 print_colored(f"📈 高波动预测({expected_movement:.2f}%)：设置止盈为7.5%，止损为4%", Colors.GREEN)
             else:
                 # 正常波动，使用默认值
-                print_colored(f"📊 正常波动预测({expected_movement:.2f}%)：使用默认止盈2.5%，止损1.75%", Colors.BLUE)
+                print_colored(f"📊 正常波动预测({expected_movement:.2f}%)：使用默认止盈2.5%，止损2%", Colors.BLUE)
 
             # 严格限制订单金额不超过账户余额的5%
             max_allowed_amount = account_balance * 0.05
@@ -2462,7 +2463,7 @@ def check_all_positions_status(self):
 
             # 获取持仓特定的止盈止损设置
             take_profit = pos.get("dynamic_take_profit", 0.025)  # 默认2.5%
-            stop_loss = pos.get("stop_loss", -0.0175)  # 默认-1.75%
+            stop_loss = pos.get("stop_loss", -0.02)  # 默认-1.75%
 
             status = "正常"
             action_needed = False
