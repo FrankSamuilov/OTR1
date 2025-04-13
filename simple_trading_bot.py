@@ -40,6 +40,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from smc_entry_conditions import evaluate_price_position_conditions
+from liquidity_events import detect_liquidity_events, evaluate_price_position_with_liquidity
+
+
 
 # 在文件开头导入所需的模块后，添加这个类定义
 class EnhancedTradingBot:
@@ -1007,7 +1010,7 @@ class EnhancedTradingBot:
         print(f"⏱️ 机器人已运行: {run_hours:.2f}小时")
 
     def generate_trade_signal(self, df, symbol):
-        """生成更积极的交易信号，考虑市场偏向和趋势优先"""
+        """生成更积极的交易信号，整合流动性事件检测，考虑市场偏向和趋势优先"""
 
         if df is None or len(df) < 20:
             return "HOLD", 0
@@ -1021,6 +1024,29 @@ class EnhancedTradingBot:
             # 计算质量评分
             quality_score, metrics = calculate_quality_score(df, self.client, symbol, None, self.config, self.logger)
             print_colored(f"{symbol} 初始质量评分: {quality_score:.2f}", Colors.INFO)
+
+            # 检测流动性事件
+            print_colored(f"检测 {symbol} 的流动性事件...", Colors.BLUE)
+            current_price = df['close'].iloc[-1]
+            liquidity_events = detect_liquidity_events(df, current_price)
+
+            # 如果检测到高质量流动性事件，提升质量评分
+            if liquidity_events["quality_score"] > 0:
+                liquidity_bonus = 0
+                if liquidity_events["quality_score"] >= 8:  # 极高质量
+                    liquidity_bonus = 1.0
+                elif liquidity_events["quality_score"] >= 6:  # 高质量
+                    liquidity_bonus = 0.7
+                elif liquidity_events["quality_score"] >= 4:  # 中等质量
+                    liquidity_bonus = 0.4
+                else:  # 低质量
+                    liquidity_bonus = 0.2
+
+                adjusted_quality = min(10, quality_score + liquidity_bonus)
+                print_colored(
+                    f"流动性事件评分: {liquidity_events['quality_score']:.2f}，质量评分调整: {quality_score:.2f} -> {adjusted_quality:.2f}",
+                    Colors.GREEN if liquidity_bonus > 0 else Colors.INFO)
+                quality_score = adjusted_quality
 
             # 获取多时间框架信号
             signal, adjusted_score, details = self.mtf_coordinator.generate_signal(symbol, quality_score)
@@ -1075,6 +1101,11 @@ class EnhancedTradingBot:
             # 降低最小预期变动要求 (从2.5%改为1.0%)
             min_movement = 1.0
 
+            # 流动性事件优化：如果检测到高质量流动性事件，降低最小预期变动要求
+            if liquidity_events["quality_score"] >= 7:
+                min_movement = 0.5  # 有高质量流动性事件只需要0.5%的变动
+                print_colored(f"⭐ 高质量流动性事件检测，降低最小预期变动要求: {min_movement}%", Colors.GREEN)
+
             # 只有当信号明确为"NEUTRAL"且预期变动很小时才保持观望
             if signal == "NEUTRAL" and expected_movement < min_movement:
                 print_colored(f"{symbol} 无明确信号且预期变动({expected_movement:.2f}%)小于{min_movement}%",
@@ -1100,6 +1131,31 @@ class EnhancedTradingBot:
                     print_colored(f"为 PAXGUSDT 生成特殊 SELL 信号", Colors.RED)
             else:
                 final_signal = "HOLD"
+
+            # 流动性事件信号调整
+            if final_signal == "HOLD" and liquidity_events["detected_events"]:
+                # 检查是否有强烈的流动性事件信号
+                for event in liquidity_events["detected_events"]:
+                    event_type = event["type"]
+                    event_strength = event.get("strength", 0)
+
+                    if event_type == "liquidity_absorption" and event_strength >= 7:
+                        direction = event.get("direction", "")
+                        if direction == "low":  # 下方流动性吸收通常是看涨信号
+                            final_signal = "BUY"
+                            print_colored(f"⭐ 基于强烈的下方流动性吸收生成 BUY 信号", Colors.GREEN)
+                        elif direction == "high":  # 上方流动性吸收通常是看跌信号
+                            final_signal = "SELL"
+                            print_colored(f"⭐ 基于强烈的上方流动性吸收生成 SELL 信号", Colors.RED)
+
+                    elif event_type == "stop_hunt" and event_strength >= 7:
+                        direction = event.get("direction", "")
+                        if direction == "down_up":  # 向下突破后反转通常是看涨信号
+                            final_signal = "BUY"
+                            print_colored(f"⭐ 基于止损猎杀后反转生成 BUY 信号", Colors.GREEN)
+                        elif direction == "up_down":  # 向上突破后反转通常是看跌信号
+                            final_signal = "SELL"
+                            print_colored(f"⭐ 基于止损猎杀后反转生成 SELL 信号", Colors.RED)
 
             # 动态止盈止损考虑
             if hasattr(self, 'dynamic_take_profit') and hasattr(self, 'dynamic_stop_loss'):
@@ -1195,7 +1251,7 @@ class EnhancedTradingBot:
 
     def check_entry_timing(self, symbol: str, side: str) -> dict:
         """
-        使用SMC方法检查当前是否是好的入场时机
+        使用SMC方法检查当前是否是好的入场时机，整合流动性事件检测
 
         参数:
             symbol: 交易对符号
@@ -1229,16 +1285,21 @@ class EnhancedTradingBot:
         ticker = self.client.futures_symbol_ticker(symbol=symbol)
         current_price = float(ticker['price'])
 
+        # 检测流动性事件
+        print_colored(f"检测 {symbol} 入场时机的流动性事件...", Colors.BLUE)
+        liquidity_events = detect_liquidity_events(df, current_price)
+
         # 执行增强的价格位置分析
         try:
             # 如果有smc_entry_conditions模块，导入并使用evaluate_price_position_conditions函数
             # 否则使用简化分析
             try:
                 from smc_entry_conditions import evaluate_price_position_conditions
-                position_evaluation = evaluate_price_position_conditions(df, current_price)
+                # 增强版：使用流动性事件增强的价格位置评估
+                position_evaluation = evaluate_price_position_with_liquidity(df, current_price)
 
                 # 更新返回结果
-                position_score = position_evaluation["score"]
+                position_score = position_evaluation.get("combined_score", position_evaluation.get("score", 5.0))
                 best_entry = position_evaluation["best_entry_price"]
                 final_eval = position_evaluation["final_evaluation"]
 
@@ -1260,6 +1321,20 @@ class EnhancedTradingBot:
 
                 # 分析价格位置
                 position_score = self.entry_manager._analyze_price_position(df, current_price, side)
+
+                # 流动性事件修饰
+                if liquidity_events["quality_score"] > 0:
+                    liquidity_bonus = 0
+                    if liquidity_events["quality_score"] >= 7:  # 高质量
+                        liquidity_bonus = 2.0
+                    elif liquidity_events["quality_score"] >= 5:  # 中等质量
+                        liquidity_bonus = 1.0
+                    else:  # 低质量
+                        liquidity_bonus = 0.5
+
+                    position_score = min(10, position_score + liquidity_bonus)
+                    print_colored(f"基于流动性事件调整位置评分: +{liquidity_bonus} -> {position_score:.2f}",
+                                  Colors.GREEN)
 
                 # 设置入场决策
                 if position_score >= 7.0:
@@ -1292,6 +1367,16 @@ class EnhancedTradingBot:
                     # 预计等待时间
                     result["wait_minutes"] = 30  # 默认等待30分钟
 
+                # 流动性事件特殊情况：如果检测到极高质量流动性事件，覆盖决策
+                if liquidity_events["quality_score"] >= 8.5:
+                    for event in liquidity_events["detected_events"]:
+                        if event.get("strength", 0) >= 8:
+                            result["should_enter"] = True
+                            result["reason"] = f"检测到极高质量流动性事件: {event['type']}"
+                            result["timing_quality"] = "excellent"
+                            print_colored(f"⭐ 基于极高质量流动性事件覆盖入场决策，建议立即入场",
+                                          Colors.GREEN + Colors.BOLD)
+
             return result
 
         except Exception as e:
@@ -1301,7 +1386,7 @@ class EnhancedTradingBot:
     def place_futures_order_usdc(self, symbol: str, side: str, amount: float, leverage: int = 5,
                                  force_entry: bool = False) -> bool:
         """
-        执行期货市场订单 - 增强版，支持入场时机等待
+        执行期货市场订单 - 增强版，支持入场时机等待和流动性事件检测
 
         参数:
             symbol: 交易对符号
@@ -1316,6 +1401,11 @@ class EnhancedTradingBot:
         import math
         import time
         from logger_utils import Colors, print_colored
+
+        # 获取历史数据用于流动性分析
+        df = self.get_historical_data_with_cache(symbol)
+        if df is not None and not df.empty and len(df) >= 20:
+            df = calculate_optimized_indicators(df)
 
         # 检查入场时机（除非是强制入场）
         if not force_entry:
@@ -1333,9 +1423,11 @@ class EnhancedTradingBot:
                 expiry_time = time.time() + max_wait * 60
 
                 # 获取当前质量评分
-                df = self.get_historical_data_with_cache(symbol)
-                _, metrics = calculate_quality_score(df, self.client, symbol, None, self.config, self.logger)
-                initial_quality_score = metrics.get('final_score', 5.0)
+                if df is not None and not df.empty:
+                    _, metrics = calculate_quality_score(df, self.client, symbol, None, self.config, self.logger)
+                    initial_quality_score = metrics.get('final_score', 5.0)
+                else:
+                    initial_quality_score = 5.0
 
                 # 添加到等待队列
                 self.entry_manager.add_waiting_entry({
@@ -1354,6 +1446,21 @@ class EnhancedTradingBot:
                 return False  # 不立即执行交易，返回False表示暂未成功
 
         try:
+            # 检测流动性事件，用于动态调整止盈止损
+            liquidity_events = None
+            if df is not None and not df.empty:
+                try:
+                    ticker = self.client.futures_symbol_ticker(symbol=symbol)
+                    current_price = float(ticker['price'])
+                    liquidity_events = detect_liquidity_events(df, current_price)
+
+                    if liquidity_events["detected_events"]:
+                        print_colored(
+                            f"⭐ 检测到{len(liquidity_events['detected_events'])}个流动性事件，质量评分: {liquidity_events['quality_score']:.2f}",
+                            Colors.GREEN)
+                except Exception as le:
+                    print_colored(f"流动性事件检测失败: {le}", Colors.WARNING)
+
             # 获取当前账户余额
             account_balance = self.get_futures_balance()
             print(f"📊 当前账户余额: {account_balance:.2f} USDC")
@@ -1371,8 +1478,17 @@ class EnhancedTradingBot:
             expected_movement = abs(predicted_price - current_price) / current_price * 100
 
             # 如果预期变动小于2.5%，则跳过交易
-            if expected_movement < 2.5 and not force_entry:
-                print_colored(f"⚠️ {symbol}的预期价格变动({expected_movement:.2f}%)小于最低要求(2.5%)", Colors.WARNING)
+            min_movement_threshold = 2.5
+
+            # 如果检测到高质量流动性事件，降低最小变动阈值
+            if liquidity_events and liquidity_events["quality_score"] >= 7:
+                min_movement_threshold = 1.5  # 高质量流动性事件时只需要1.5%的预期变动
+                print_colored(f"⭐ 高质量流动性事件降低最小变动阈值至{min_movement_threshold}%", Colors.GREEN)
+
+            if expected_movement < min_movement_threshold and not force_entry:
+                print_colored(
+                    f"⚠️ {symbol}的预期价格变动({expected_movement:.2f}%)小于最低要求({min_movement_threshold}%)",
+                    Colors.WARNING)
                 self.logger.warning(f"{symbol}预期变动不足", extra={"expected_movement": expected_movement})
                 return False
 
@@ -1396,6 +1512,68 @@ class EnhancedTradingBot:
             else:
                 # 正常波动，使用默认值
                 print_colored(f"📊 正常波动预测({expected_movement:.2f}%)：使用默认止盈2.5%，止损2%", Colors.BLUE)
+
+            # 流动性事件止盈止损调整
+            if liquidity_events and liquidity_events["detected_events"]:
+                for event in liquidity_events["detected_events"]:
+                    event_type = event["type"]
+                    event_strength = event.get("strength", 0)
+
+                    # 流动性吸收通常提供更精确的止盈止损位
+                    if event_type == "liquidity_absorption" and event_strength >= 6:
+                        # 止损就设在流动性吸收水平之外
+                        level = event.get("level", 0)
+                        direction = event.get("direction", "")
+
+                        if level > 0:
+                            if side == "BUY" and direction == "low":
+                                # 多单止损设在低点流动性吸收水平下方
+                                custom_stop_loss = (level * 0.995 - current_price) / current_price
+                                if custom_stop_loss < stop_loss:  # 确保不会扩大止损
+                                    stop_loss = custom_stop_loss
+                                    print_colored(f"⭐ 基于低点流动性吸收调整止损至: {stop_loss * 100:.2f}%",
+                                                  Colors.GREEN)
+                            elif side == "SELL" and direction == "high":
+                                # 空单止损设在高点流动性吸收水平上方
+                                custom_stop_loss = (current_price - level * 1.005) / current_price
+                                if custom_stop_loss < stop_loss:  # 确保不会扩大止损
+                                    stop_loss = custom_stop_loss
+                                    print_colored(f"⭐ 基于高点流动性吸收调整止损至: {stop_loss * 100:.2f}%",
+                                                  Colors.GREEN)
+
+                    # 止损猎杀事件可能使常规止损无效，调整位置
+                    elif event_type == "stop_hunt" and event_strength >= 7:
+                        level = event.get("level", 0)
+                        direction = event.get("direction", "")
+
+                        if level > 0:
+                            if side == "BUY" and direction == "down_up":
+                                # 多单止损设在止损猎杀水平以下
+                                hunt_low = level * 0.99  # 低于猎杀水平1%
+                                custom_stop_loss = (hunt_low - current_price) / current_price
+                                if custom_stop_loss < stop_loss:  # 用更宽松的止损
+                                    stop_loss = custom_stop_loss
+                                    print_colored(f"⭐ 基于止损猎杀调整多单止损至: {stop_loss * 100:.2f}%", Colors.GREEN)
+
+                                # 可能需要更大的止盈
+                                if event_strength > 8:  # 非常强的猎杀反转
+                                    take_profit = max(take_profit, 0.05)  # 至少5%止盈
+                                    print_colored(f"⭐ 基于强猎杀反转调整多单止盈至: {take_profit * 100:.2f}%",
+                                                  Colors.GREEN)
+
+                            elif side == "SELL" and direction == "up_down":
+                                # 空单止损设在止损猎杀水平以上
+                                hunt_high = level * 1.01  # 高于猎杀水平1%
+                                custom_stop_loss = (current_price - hunt_high) / current_price
+                                if custom_stop_loss < stop_loss:  # 用更宽松的止损
+                                    stop_loss = custom_stop_loss
+                                    print_colored(f"⭐ 基于止损猎杀调整空单止损至: {stop_loss * 100:.2f}%", Colors.GREEN)
+
+                                # 可能需要更大的止盈
+                                if event_strength > 8:  # 非常强的猎杀反转
+                                    take_profit = max(take_profit, 0.05)  # 至少5%止盈
+                                    print_colored(f"⭐ 基于强猎杀反转调整空单止盈至: {take_profit * 100:.2f}%",
+                                                  Colors.GREEN)
 
             # 严格限制订单金额不超过账户余额的5%
             max_allowed_amount = account_balance * 0.05
