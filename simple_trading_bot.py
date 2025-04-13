@@ -859,15 +859,51 @@ class EnhancedTradingBot:
             return False
 
     def get_futures_balance(self):
-        """获取USDC期货账户余额"""
+        """获取期货账户可用余额(包含所有资产)"""
         try:
-            assets = self.client.futures_account_balance()
-            for asset in assets:
-                if asset["asset"] == "USDC":
-                    return float(asset["balance"])
-            return 0.0
+            # 获取期货账户信息
+            account_info = self.client.futures_account()
+
+            # 初始化总可用余额(USDT等值)
+            total_available_balance = 0.0
+
+            # 记录各资产余额以便日志
+            balances_info = {}
+
+            # 遍历所有资产
+            for asset in account_info['assets']:
+                asset_symbol = asset['asset']
+                # 获取可用余额(可以用于开新仓位的资金)
+                available_balance = float(asset['availableBalance'])
+                # 获取钱包余额
+                wallet_balance = float(asset['walletBalance'])
+
+                # 记录重要资产信息
+                if available_balance > 0 or wallet_balance > 0:
+                    balances_info[asset_symbol] = {
+                        'available': available_balance,
+                        'wallet': wallet_balance
+                    }
+
+                    # 累加到总可用余额
+                    total_available_balance += available_balance
+
+            # 记录日志，展示所有有余额的资产
+            self.logger.info("期货账户余额信息", extra={
+                "total_available": total_available_balance,
+                "balances": balances_info
+            })
+
+            # 在控制台显示余额信息
+            print(f"💰 期货账户可用余额: {total_available_balance:.2f}")
+            for symbol, info in balances_info.items():
+                if info['available'] > 0:
+                    print(f"  - {symbol}: 可用 {info['available']:.6f}, 钱包 {info['wallet']:.6f}")
+
+            return total_available_balance
         except Exception as e:
             self.logger.error(f"获取期货余额失败: {e}")
+            print(f"❌ 获取期货余额失败: {e}")
             return 0.0
 
     def get_historical_data_with_cache(self, symbol, interval="15m", limit=200, force_refresh=False):
@@ -1383,8 +1419,7 @@ class EnhancedTradingBot:
             print_colored(f"❌ 入场时机检查出错: {e}", Colors.ERROR)
             return result
 
-    def place_futures_order_usdc(self, symbol: str, side: str, amount: float, leverage: int = 5,
-                                 force_entry: bool = False) -> bool:
+    def place_futures_order_usdc(self, symbol: str, side: str, leverage: int = 5, force_entry: bool = False) -> bool:
         """
         执行期货市场订单 - 增强版，支持入场时机等待和流动性事件检测
 
@@ -1401,6 +1436,22 @@ class EnhancedTradingBot:
         import math
         import time
         from logger_utils import Colors, print_colored
+
+        amount = self.calculate_order_amount(symbol, side, quality_score)
+
+        if amount <= 0:
+            print_colored(f"❌ {symbol} 计算下单金额失败或金额不足", Colors.ERROR)
+            return False
+
+        # 计算实际需要的保证金
+        margin_required = amount / leverage
+
+        # 获取账户可用余额并检查保证金是否足够
+        has_enough_margin, available_margin = self.check_available_margin(symbol, margin_required)
+
+        if not has_enough_margin:
+            print(f"❌ 保证金不足: 需要 {margin_required:.2f} USDT, 可用 {available_margin:.2f} USDT")
+            return False
 
         # 获取历史数据用于流动性分析
         df = self.get_historical_data_with_cache(symbol)
