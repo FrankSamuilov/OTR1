@@ -35,12 +35,30 @@ def load_positions(client, logger=None):
                     "max_profit": 0.0,
                     "position_side": position_side,
                     "target_profit": 0.0,
-                    "dynamic_take_profit": 0.06,  # 默认6%止盈
-                    "stop_loss": -0.03,  # 默认3%止损
+                    # 使用从交易所获取的值，如果没有则使用默认值
+                    "dynamic_take_profit": float(pos.get("takeProfit", 0.025)),  # 默认使用2.5%止盈
+                    "stop_loss": float(pos.get("stopLoss", -0.02)),  # 默认使用1.75%止损
                     "last_check_time": time.time(),
                     "last_check_price": float(pos.get("markPrice", 0)),
                     "position_id": f"{pos['symbol']}_{position_side}_{int(time.time())}"
                 })
+                open_positions.append({
+                    "symbol": pos["symbol"],
+                    "side": side,
+                    "entry_price": float(pos.get("entryPrice", 0)),
+                    "quantity": abs(amt),
+                    "open_time": float(pos.get("updateTime", 0)) / 1000,
+                    "max_profit": 0.0,
+                    "position_side": position_side,
+                    "target_profit": 0.0,
+                    # 使用从交易所获取的值，如果没有则使用默认值
+                    "dynamic_take_profit": float(pos.get("takeProfit", 0.025)),  # 默认使用2.5%止盈
+                    "stop_loss": float(pos.get("stopLoss", -0.02)),  # 默认使用1.75%止损
+                    "last_check_time": time.time(),
+                    "last_check_price": float(pos.get("markPrice", 0)),
+                    "position_id": f"{pos['symbol']}_{position_side}_{int(time.time())}"
+                })
+
 
                 if logger:
                     logger.info(f"加载持仓: {pos['symbol']} {side} {amt}")

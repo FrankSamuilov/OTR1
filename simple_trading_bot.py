@@ -39,9 +39,6 @@ import datetime
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-from smc_entry_conditions import evaluate_price_position_conditions
-from liquidity_events import detect_liquidity_events, evaluate_price_position_with_liquidity
-
 
 
 # 在文件开头导入所需的模块后，添加这个类定义
@@ -64,7 +61,7 @@ class EnhancedTradingBot:
         self.trend_priority = False  # 是否优先考虑趋势明确的交易对
         self.strong_trend_symbols = []  # 趋势明确的交易对列表
         self.entry_manager = EntryWaitingManager(self)
-        print("✅ 入场时机等待管理器已初始化")
+        # 多时间框架协调器初始化
         self.mtf_coordinator = MultiTimeframeCoordinator(self.client, self.logger)
         print("✅ 多时间框架协调器初始化完成")
 
@@ -325,16 +322,11 @@ class EnhancedTradingBot:
             self.logger.error(f"主动持仓监控错误", extra={"error": str(e)})
 
     def trade(self):
-        """增强版多时框架集成交易循环，包含动态入场等待管理"""
+        """增强版多时框架集成交易循环，包含主动持仓监控"""
         import threading
 
         print("启动增强版多时间框架集成交易机器人...")
         self.logger.info("增强版多时间框架集成交易机器人启动", extra={"version": "Enhanced-MTF-" + VERSION})
-
-        # 启动入场时机监控
-        if hasattr(self, 'entry_manager'):
-            self.entry_manager.start_monitor()
-        print("✅ 入场时机监控已启动")
 
         # 在单独的线程中启动主动持仓监控
         monitor_thread = threading.Thread(target=self.active_position_monitor, args=(15,), daemon=True)
@@ -379,10 +371,6 @@ class EnhancedTradingBot:
 
                 # 管理现有持仓
                 self.manage_open_positions()
-
-                # 显示等待中的入场订单
-                if hasattr(self, 'entry_manager'):
-                    self.display_waiting_entries()
 
                 # 分析交易对并生成建议
                 trade_candidates = []
@@ -551,11 +539,6 @@ class EnhancedTradingBot:
             except KeyboardInterrupt:
                 print("\n用户中断，退出程序")
                 self.logger.info("用户中断，程序结束")
-
-                # 停止入场管理器
-                if hasattr(self, 'entry_manager'):
-                    self.entry_manager.stop_monitor()
-
                 break
             except Exception as e:
                 self.logger.error(f"交易循环异常: {e}")
@@ -859,51 +842,15 @@ class EnhancedTradingBot:
             return False
 
     def get_futures_balance(self):
-        """获取期货账户可用余额(包含所有资产)"""
+        """获取USDC期货账户余额"""
         try:
-            # 获取期货账户信息
-            account_info = self.client.futures_account()
-
-            # 初始化总可用余额(USDT等值)
-            total_available_balance = 0.0
-
-            # 记录各资产余额以便日志
-            balances_info = {}
-
-            # 遍历所有资产
-            for asset in account_info['assets']:
-                asset_symbol = asset['asset']
-                # 获取可用余额(可以用于开新仓位的资金)
-                available_balance = float(asset['availableBalance'])
-                # 获取钱包余额
-                wallet_balance = float(asset['walletBalance'])
-
-                # 记录重要资产信息
-                if available_balance > 0 or wallet_balance > 0:
-                    balances_info[asset_symbol] = {
-                        'available': available_balance,
-                        'wallet': wallet_balance
-                    }
-
-                    # 累加到总可用余额
-                    total_available_balance += available_balance
-
-            # 记录日志，展示所有有余额的资产
-            self.logger.info("期货账户余额信息", extra={
-                "total_available": total_available_balance,
-                "balances": balances_info
-            })
-
-            # 在控制台显示余额信息
-            print(f"💰 期货账户可用余额: {total_available_balance:.2f}")
-            for symbol, info in balances_info.items():
-                if info['available'] > 0:
-                    print(f"  - {symbol}: 可用 {info['available']:.6f}, 钱包 {info['wallet']:.6f}")
-
-            return total_available_balance
+            assets = self.client.futures_account_balance()
+            for asset in assets:
+                if asset["asset"] == "USDC":
+                    return float(asset["balance"])
+            return 0.0
         except Exception as e:
             self.logger.error(f"获取期货余额失败: {e}")
-            print(f"❌ 获取期货余额失败: {e}")
             return 0.0
 
     def get_historical_data_with_cache(self, symbol, interval="15m", limit=200, force_refresh=False):
@@ -1046,7 +993,7 @@ class EnhancedTradingBot:
         print(f"⏱️ 机器人已运行: {run_hours:.2f}小时")
 
     def generate_trade_signal(self, df, symbol):
-        """生成更积极的交易信号，整合流动性事件检测，考虑市场偏向和趋势优先"""
+        """生成更积极的交易信号，考虑市场偏向和趋势优先"""
 
         if df is None or len(df) < 20:
             return "HOLD", 0
@@ -1060,29 +1007,6 @@ class EnhancedTradingBot:
             # 计算质量评分
             quality_score, metrics = calculate_quality_score(df, self.client, symbol, None, self.config, self.logger)
             print_colored(f"{symbol} 初始质量评分: {quality_score:.2f}", Colors.INFO)
-
-            # 检测流动性事件
-            print_colored(f"检测 {symbol} 的流动性事件...", Colors.BLUE)
-            current_price = df['close'].iloc[-1]
-            liquidity_events = detect_liquidity_events(df, current_price)
-
-            # 如果检测到高质量流动性事件，提升质量评分
-            if liquidity_events["quality_score"] > 0:
-                liquidity_bonus = 0
-                if liquidity_events["quality_score"] >= 8:  # 极高质量
-                    liquidity_bonus = 1.0
-                elif liquidity_events["quality_score"] >= 6:  # 高质量
-                    liquidity_bonus = 0.7
-                elif liquidity_events["quality_score"] >= 4:  # 中等质量
-                    liquidity_bonus = 0.4
-                else:  # 低质量
-                    liquidity_bonus = 0.2
-
-                adjusted_quality = min(10, quality_score + liquidity_bonus)
-                print_colored(
-                    f"流动性事件评分: {liquidity_events['quality_score']:.2f}，质量评分调整: {quality_score:.2f} -> {adjusted_quality:.2f}",
-                    Colors.GREEN if liquidity_bonus > 0 else Colors.INFO)
-                quality_score = adjusted_quality
 
             # 获取多时间框架信号
             signal, adjusted_score, details = self.mtf_coordinator.generate_signal(symbol, quality_score)
@@ -1137,11 +1061,6 @@ class EnhancedTradingBot:
             # 降低最小预期变动要求 (从2.5%改为1.0%)
             min_movement = 1.0
 
-            # 流动性事件优化：如果检测到高质量流动性事件，降低最小预期变动要求
-            if liquidity_events["quality_score"] >= 7:
-                min_movement = 0.5  # 有高质量流动性事件只需要0.5%的变动
-                print_colored(f"⭐ 高质量流动性事件检测，降低最小预期变动要求: {min_movement}%", Colors.GREEN)
-
             # 只有当信号明确为"NEUTRAL"且预期变动很小时才保持观望
             if signal == "NEUTRAL" and expected_movement < min_movement:
                 print_colored(f"{symbol} 无明确信号且预期变动({expected_movement:.2f}%)小于{min_movement}%",
@@ -1167,31 +1086,6 @@ class EnhancedTradingBot:
                     print_colored(f"为 PAXGUSDT 生成特殊 SELL 信号", Colors.RED)
             else:
                 final_signal = "HOLD"
-
-            # 流动性事件信号调整
-            if final_signal == "HOLD" and liquidity_events["detected_events"]:
-                # 检查是否有强烈的流动性事件信号
-                for event in liquidity_events["detected_events"]:
-                    event_type = event["type"]
-                    event_strength = event.get("strength", 0)
-
-                    if event_type == "liquidity_absorption" and event_strength >= 7:
-                        direction = event.get("direction", "")
-                        if direction == "low":  # 下方流动性吸收通常是看涨信号
-                            final_signal = "BUY"
-                            print_colored(f"⭐ 基于强烈的下方流动性吸收生成 BUY 信号", Colors.GREEN)
-                        elif direction == "high":  # 上方流动性吸收通常是看跌信号
-                            final_signal = "SELL"
-                            print_colored(f"⭐ 基于强烈的上方流动性吸收生成 SELL 信号", Colors.RED)
-
-                    elif event_type == "stop_hunt" and event_strength >= 7:
-                        direction = event.get("direction", "")
-                        if direction == "down_up":  # 向下突破后反转通常是看涨信号
-                            final_signal = "BUY"
-                            print_colored(f"⭐ 基于止损猎杀后反转生成 BUY 信号", Colors.GREEN)
-                        elif direction == "up_down":  # 向上突破后反转通常是看跌信号
-                            final_signal = "SELL"
-                            print_colored(f"⭐ 基于止损猎杀后反转生成 SELL 信号", Colors.RED)
 
             # 动态止盈止损考虑
             if hasattr(self, 'dynamic_take_profit') and hasattr(self, 'dynamic_stop_loss'):
@@ -1287,7 +1181,7 @@ class EnhancedTradingBot:
 
     def check_entry_timing(self, symbol: str, side: str) -> dict:
         """
-        使用SMC方法检查当前是否是好的入场时机，整合流动性事件检测
+        检查当前是否是好的入场时机，如果不是则提供预计入场价格和等待时间
 
         参数:
             symbol: 交易对符号
@@ -1295,10 +1189,19 @@ class EnhancedTradingBot:
 
         返回:
             dict: 包含入场决策和等待建议的字典
+            {
+                "should_enter": 是否应该立即入场(布尔值),
+                "expected_price": 预期入场价格,
+                "wait_minutes": 预计等待分钟数,
+                "reason": 决策理由,
+                "timing_quality": 入场时机质量评估
+            }
         """
         from logger_utils import Colors, print_colored
+        from pivot_points_module import calculate_pivot_points, analyze_pivot_point_strategy
+        from indicators_module import find_swing_points, calculate_fibonacci_retracements, get_smc_trend_and_duration
 
-        # 默认返回结果
+        # 默认返回结果 - 允许入场
         result = {
             "should_enter": True,
             "expected_price": 0.0,
@@ -1310,125 +1213,273 @@ class EnhancedTradingBot:
         # 获取历史数据
         df = self.get_historical_data_with_cache(symbol)
         if df is None or df.empty or len(df) < 20:
-            return result
+            return result  # 如果无法获取数据，默认允许入场
 
-        # 计算指标
-        df = calculate_optimized_indicators(df)
-        if df is None or df.empty:
-            return result
-
-        # 获取当前价格
-        ticker = self.client.futures_symbol_ticker(symbol=symbol)
-        current_price = float(ticker['price'])
-
-        # 检测流动性事件
-        print_colored(f"检测 {symbol} 入场时机的流动性事件...", Colors.BLUE)
-        liquidity_events = detect_liquidity_events(df, current_price)
-
-        # 执行增强的价格位置分析
+        # 添加必要的技术指标
         try:
-            # 如果有smc_entry_conditions模块，导入并使用evaluate_price_position_conditions函数
-            # 否则使用简化分析
-            try:
-                from smc_entry_conditions import evaluate_price_position_conditions
-                # 增强版：使用流动性事件增强的价格位置评估
-                position_evaluation = evaluate_price_position_with_liquidity(df, current_price)
+            # 确保数据中包含支点
+            if 'Classic_PP' not in df.columns:
+                df = calculate_pivot_points(df, method='classic')
 
-                # 更新返回结果
-                position_score = position_evaluation.get("combined_score", position_evaluation.get("score", 5.0))
-                best_entry = position_evaluation["best_entry_price"]
-                final_eval = position_evaluation["final_evaluation"]
+            # 获取支点分析
+            pivot_analysis = analyze_pivot_point_strategy(df, method='classic')
 
-                result["expected_price"] = best_entry["price"]
-                result["wait_needed"] = best_entry["wait_needed"]
-                result["should_enter"] = not best_entry["wait_needed"]
-                result["wait_minutes"] = best_entry.get("wait_minutes", 30)  # 默认等待30分钟
-                result["timing_quality"] = final_eval["quality"]
-                result["reason"] = best_entry["wait_description"]
+            # 获取当前价格
+            ticker = self.client.futures_symbol_ticker(symbol=symbol)
+            current_price = float(ticker['price'])
 
-            except ImportError:
-                # 简化的分析
-                # 这里可以调用 _analyze_price_position 方法
-                print_colored("使用简化的价格位置分析", Colors.INFO)
+            # 获取摆动点
+            swing_highs, swing_lows = find_swing_points(df)
 
-                # 创建EntryWaitingManager的临时实例
-                if not hasattr(self, 'entry_manager'):
-                    self.entry_manager = EntryWaitingManager(self)
+            # 获取Fibonacci回撤水平
+            fib_levels = calculate_fibonacci_retracements(df)
 
-                # 分析价格位置
-                position_score = self.entry_manager._analyze_price_position(df, current_price, side)
+            # 获取趋势信息
+            trend, duration, trend_info = get_smc_trend_and_duration(df)
 
-                # 流动性事件修饰
-                if liquidity_events["quality_score"] > 0:
-                    liquidity_bonus = 0
-                    if liquidity_events["quality_score"] >= 7:  # 高质量
-                        liquidity_bonus = 2.0
-                    elif liquidity_events["quality_score"] >= 5:  # 中等质量
-                        liquidity_bonus = 1.0
-                    else:  # 低质量
-                        liquidity_bonus = 0.5
+            # 获取布林带信息
+            bb_upper = df['BB_Upper'].iloc[-1] if 'BB_Upper' in df.columns else None
+            bb_lower = df['BB_Lower'].iloc[-1] if 'BB_Lower' in df.columns else None
+            bb_middle = df['BB_Middle'].iloc[-1] if 'BB_Middle' in df.columns else None
 
-                    position_score = min(10, position_score + liquidity_bonus)
-                    print_colored(f"基于流动性事件调整位置评分: +{liquidity_bonus} -> {position_score:.2f}",
-                                  Colors.GREEN)
+            # 获取ATR信息，用于评估波动性
+            atr = df['ATR'].iloc[-1] if 'ATR' in df.columns else (df['high'].iloc[-1] - df['low'].iloc[-1]) * 0.1
 
-                # 设置入场决策
-                if position_score >= 7.0:
+            # 根据ATR和当前价格计算预期等待时间(假设每分钟价格变动约为ATR的5%)
+            atr_per_minute = atr * 0.05
+
+            # 1. 检查买入入场条件
+            if side == "BUY":
+                # 获取关键支撑和阻力位
+                support_1 = pivot_analysis["support_1"]
+                resistance_1 = pivot_analysis["resistance_1"]
+                pivot_point = pivot_analysis["pivot_point"]
+
+                # 买入最佳入场条件:
+
+                # A. 价格已经突破阻力位 - 立即入场
+                if current_price > resistance_1 * 1.005:  # 突破阻力位R1达0.5%
                     result["should_enter"] = True
-                    result["reason"] = f"价格位置条件优秀 (评分: {position_score:.2f}/10)"
-                    result["timing_quality"] = "excellent"
-                elif position_score >= 5.0:
+                    result["reason"] = f"价格 {current_price:.6f} 已突破阻力位 R1 {resistance_1:.6f}，确认上涨趋势"
+                    result["timing_quality"] = "优秀"
+                    return result
+
+                # B. 价格在支撑位附近 - 立即入场
+                if current_price < support_1 * 1.01:  # 在支撑位S1附近1%范围内
                     result["should_enter"] = True
-                    result["reason"] = f"价格位置条件良好 (评分: {position_score:.2f}/10)"
-                    result["timing_quality"] = "good"
-                else:
+                    result["reason"] = f"价格 {current_price:.6f} 接近支撑位 S1 {support_1:.6f}，可能反弹"
+                    result["timing_quality"] = "优秀"
+                    return result
+
+                # C. 布林带突破 - 立即入场
+                if bb_upper is not None and current_price > bb_upper * 1.002:
+                    result["should_enter"] = True
+                    result["reason"] = f"价格 {current_price:.6f} 突破布林带上轨 {bb_upper:.6f}，动能上升"
+                    result["timing_quality"] = "优秀"
+                    return result
+
+                # D. 趋势向上且回调到支撑位 - 立即入场
+                if trend == "UP" and current_price < bb_middle * 1.01 and current_price > bb_middle * 0.99:
+                    result["should_enter"] = True
+                    result["reason"] = f"价格回调至中轨附近 {bb_middle:.6f}，上升趋势中的回调买入"
+                    result["timing_quality"] = "良好"
+                    return result
+
+                # E. 特定Fibonacci回撤位 - 立即入场
+                if fib_levels and len(fib_levels) >= 3:
+                    fib_0382 = fib_levels[1]  # 0.382回撤位
+                    fib_0618 = fib_levels[2]  # 0.618回撤位
+
+                    if abs(current_price - fib_0618) / fib_0618 < 0.01:
+                        result["should_enter"] = True
+                        result["reason"] = f"价格 {current_price:.6f} 接近 0.618 Fibonacci回撤位 {fib_0618:.6f}"
+                        result["timing_quality"] = "良好"
+                        return result
+
+                    if abs(current_price - fib_0382) / fib_0382 < 0.01:
+                        result["should_enter"] = True
+                        result["reason"] = f"价格 {current_price:.6f} 接近 0.382 Fibonacci回撤位 {fib_0382:.6f}"
+                        result["timing_quality"] = "良好"
+                        return result
+
+                # F. 支点信号强烈建议买入 - 立即入场
+                if pivot_analysis["signal"] == "BUY" and pivot_analysis["confidence"] >= 0.7:
+                    result["should_enter"] = True
+                    result["reason"] = f"支点分析给出高置信度买入信号: {pivot_analysis['reason']}"
+                    result["timing_quality"] = "良好"
+                    return result
+
+                # 如果没有满足最佳入场条件，提供等待建议:
+
+                # 情况1: 价格高于阻力位下方 - 等待回调
+                if current_price > pivot_point and current_price < resistance_1 * 0.99:
+                    expected_price = resistance_1 * 1.01  # 期望价格突破阻力位1%
+                    price_diff = expected_price - current_price
+                    wait_minutes = max(10, abs(int(price_diff / atr_per_minute)))
+
                     result["should_enter"] = False
-                    result["reason"] = f"价格位置条件较差 (评分: {position_score:.2f}/10)"
-                    result["timing_quality"] = "poor"
+                    result["expected_price"] = expected_price
+                    result["wait_minutes"] = wait_minutes
+                    result["reason"] = f"价格接近阻力位，等待突破 R1 {resistance_1:.6f} 后入场"
+                    result["timing_quality"] = "一般"
+                    return result
 
-                    # 寻找更好的入场价格
-                    if side == "BUY":
-                        # 对于买入，尝试在更低的价位入场
-                        if 'BB_Lower' in df.columns:
-                            result["expected_price"] = df['BB_Lower'].iloc[-1]
-                        else:
-                            result["expected_price"] = current_price * 0.995  # 默认下探0.5%
-                    else:  # SELL
-                        # 对于卖出，尝试在更高的价位入场
-                        if 'BB_Upper' in df.columns:
-                            result["expected_price"] = df['BB_Upper'].iloc[-1]
-                        else:
-                            result["expected_price"] = current_price * 1.005  # 默认上涨0.5%
+                # 情况2: 价格远离支撑位 - 等待回调到支撑位
+                if current_price > support_1 * 1.03:
+                    expected_price = support_1 * 1.01  # 期望价格靠近支撑位1%内
+                    price_diff = current_price - expected_price
+                    wait_minutes = max(15, abs(int(price_diff / atr_per_minute)))
 
-                    # 预计等待时间
-                    result["wait_minutes"] = 30  # 默认等待30分钟
+                    result["should_enter"] = False
+                    result["expected_price"] = expected_price
+                    result["wait_minutes"] = wait_minutes
+                    result["reason"] = f"价格远离支撑位，等待回调至 S1 {support_1:.6f} 附近后入场"
+                    result["timing_quality"] = "一般"
+                    return result
 
-                # 流动性事件特殊情况：如果检测到极高质量流动性事件，覆盖决策
-                if liquidity_events["quality_score"] >= 8.5:
-                    for event in liquidity_events["detected_events"]:
-                        if event.get("strength", 0) >= 8:
-                            result["should_enter"] = True
-                            result["reason"] = f"检测到极高质量流动性事件: {event['type']}"
-                            result["timing_quality"] = "excellent"
-                            print_colored(f"⭐ 基于极高质量流动性事件覆盖入场决策，建议立即入场",
-                                          Colors.GREEN + Colors.BOLD)
+                # 情况3: 价格远离中轨 - 等待回调到中轨
+                if bb_middle is not None and current_price > bb_middle * 1.02:
+                    expected_price = bb_middle
+                    price_diff = current_price - expected_price
+                    wait_minutes = max(12, abs(int(price_diff / atr_per_minute)))
 
-            return result
+                    result["should_enter"] = False
+                    result["expected_price"] = expected_price
+                    result["wait_minutes"] = wait_minutes
+                    result["reason"] = f"价格高于中轨，等待回调至布林带中轨 {bb_middle:.6f} 后入场"
+                    result["timing_quality"] = "一般"
+                    return result
+
+                # 如果没有明确的等待条件，默认允许入场
+                result["timing_quality"] = "一般"
+                return result
+
+            # 2. 检查卖出入场条件
+            elif side == "SELL":
+                # 获取关键支撑和阻力位
+                support_1 = pivot_analysis["support_1"]
+                resistance_1 = pivot_analysis["resistance_1"]
+                pivot_point = pivot_analysis["pivot_point"]
+
+                # 卖出最佳入场条件:
+
+                # A. 价格已经跌破支撑位 - 立即入场
+                if current_price < support_1 * 0.995:  # 跌破支撑位S1达0.5%
+                    result["should_enter"] = True
+                    result["reason"] = f"价格 {current_price:.6f} 已跌破支撑位 S1 {support_1:.6f}，确认下跌趋势"
+                    result["timing_quality"] = "优秀"
+                    return result
+
+                # B. 价格在阻力位附近 - 立即入场
+                if current_price > resistance_1 * 0.99:  # 在阻力位R1附近1%范围内
+                    result["should_enter"] = True
+                    result["reason"] = f"价格 {current_price:.6f} 接近阻力位 R1 {resistance_1:.6f}，可能回落"
+                    result["timing_quality"] = "优秀"
+                    return result
+
+                # C. 布林带突破 - 立即入场
+                if bb_lower is not None and current_price < bb_lower * 0.998:
+                    result["should_enter"] = True
+                    result["reason"] = f"价格 {current_price:.6f} 跌破布林带下轨 {bb_lower:.6f}，动能下降"
+                    result["timing_quality"] = "优秀"
+                    return result
+
+                # D. 趋势向下且反弹到阻力位 - 立即入场
+                if trend == "DOWN" and current_price < bb_middle * 1.01 and current_price > bb_middle * 0.99:
+                    result["should_enter"] = True
+                    result["reason"] = f"价格反弹至中轨附近 {bb_middle:.6f}，下降趋势中的反弹卖出"
+                    result["timing_quality"] = "良好"
+                    return result
+
+                # E. 特定Fibonacci回撤位 - 立即入场
+                if fib_levels and len(fib_levels) >= 3:
+                    fib_0382 = fib_levels[1]  # 0.382回撤位
+                    fib_0618 = fib_levels[2]  # 0.618回撤位
+
+                    if abs(current_price - fib_0382) / fib_0382 < 0.01:
+                        result["should_enter"] = True
+                        result["reason"] = f"价格 {current_price:.6f} 接近 0.382 Fibonacci回撤位 {fib_0382:.6f}"
+                        result["timing_quality"] = "良好"
+                        return result
+
+                    if abs(current_price - fib_0618) / fib_0618 < 0.01:
+                        result["should_enter"] = True
+                        result["reason"] = f"价格 {current_price:.6f} 接近 0.618 Fibonacci回撤位 {fib_0618:.6f}"
+                        result["timing_quality"] = "良好"
+                        return result
+
+                # F. 支点信号强烈建议卖出 - 立即入场
+                if pivot_analysis["signal"] == "SELL" and pivot_analysis["confidence"] >= 0.7:
+                    result["should_enter"] = True
+                    result["reason"] = f"支点分析给出高置信度卖出信号: {pivot_analysis['reason']}"
+                    result["timing_quality"] = "良好"
+                    return result
+
+                # 如果没有满足最佳入场条件，提供等待建议:
+
+                # 情况1: 价格低于支撑位上方 - 等待跌破
+                if current_price < pivot_point and current_price > support_1 * 1.01:
+                    expected_price = support_1 * 0.99  # 期望价格跌破支撑位1%
+                    price_diff = current_price - expected_price
+                    wait_minutes = max(10, abs(int(price_diff / atr_per_minute)))
+
+                    result["should_enter"] = False
+                    result["expected_price"] = expected_price
+                    result["wait_minutes"] = wait_minutes
+                    result["reason"] = f"价格接近支撑位，等待跌破 S1 {support_1:.6f} 后入场"
+                    result["timing_quality"] = "一般"
+                    return result
+
+                # 情况2: 价格远离阻力位 - 等待反弹到阻力位
+                if current_price < resistance_1 * 0.97:
+                    expected_price = resistance_1 * 0.99  # 期望价格靠近阻力位1%内
+                    price_diff = expected_price - current_price
+                    wait_minutes = max(15, abs(int(price_diff / atr_per_minute)))
+
+                    result["should_enter"] = False
+                    result["expected_price"] = expected_price
+                    result["wait_minutes"] = wait_minutes
+                    result["reason"] = f"价格远离阻力位，等待反弹至 R1 {resistance_1:.6f} 附近后入场"
+                    result["timing_quality"] = "一般"
+                    return result
+
+                # 情况3: 价格远离中轨 - 等待反弹到中轨
+                if bb_middle is not None and current_price < bb_middle * 0.98:
+                    expected_price = bb_middle
+                    price_diff = expected_price - current_price
+                    wait_minutes = max(12, abs(int(price_diff / atr_per_minute)))
+
+                    result["should_enter"] = False
+                    result["expected_price"] = expected_price
+                    result["wait_minutes"] = wait_minutes
+                    result["reason"] = f"价格低于中轨，等待反弹至布林带中轨 {bb_middle:.6f} 后入场"
+                    result["timing_quality"] = "一般"
+                    return result
+
+                # 如果没有明确的等待条件，默认允许入场
+                result["timing_quality"] = "一般"
+                return result
 
         except Exception as e:
-            print_colored(f"❌ 入场时机检查出错: {e}", Colors.ERROR)
+            # 如果计算过程出错，记录日志并默认允许入场
+            import traceback
+            error_details = traceback.format_exc()
+            print_colored(f"⚠️ 入场时机检查出错: {str(e)}", Colors.ERROR)
+            self.logger.error("入场时机检查出错", extra={"error": str(e), "traceback": error_details})
             return result
 
-    def place_futures_order_usdc(self, symbol: str, side: str, leverage: int = 5, force_entry: bool = False) -> bool:
+        # 如果执行到这里，表示没有匹配到任何入场条件，返回默认结果
+        return result
+
+    def place_futures_order_usdc(self, symbol: str, side: str, amount: float, leverage: int = 5) -> bool:
         """
-        执行期货市场订单 - 增强版，支持入场时机等待和流动性事件检测
+        执行期货市场订单 - 增强版，包含入场时机检查和动态止盈止损
 
         参数:
             symbol: 交易对符号
             side: 交易方向 ('BUY' 或 'SELL')
             amount: 交易金额(USDC)
             leverage: 杠杆倍数
-            force_entry: 是否强制入场，跳过入场时机检查
 
         返回:
             bool: 交易是否成功
@@ -1436,82 +1487,28 @@ class EnhancedTradingBot:
         import math
         import time
         from logger_utils import Colors, print_colored
+        from pivot_points_module import calculate_pivot_points, analyze_pivot_point_strategy
+        from indicators_module import find_swing_points, calculate_fibonacci_retracements, get_smc_trend_and_duration
 
-        amount = self.calculate_order_amount(symbol, side, quality_score)
+        # 检查入场时机
+        entry_timing = self.check_entry_timing(symbol, side)
 
-        if amount <= 0:
-            print_colored(f"❌ {symbol} 计算下单金额失败或金额不足", Colors.ERROR)
+        # 如果入场时机不佳，提供等待建议但不立即执行交易
+        if not entry_timing["should_enter"]:
+            print_colored(f"\n⏳ {symbol} {side} 入场时机不佳，建议等待", Colors.YELLOW)
+            print_colored(f"预计更好的入场价格: {entry_timing['expected_price']:.6f}", Colors.YELLOW)
+            print_colored(f"预计等待时间: {entry_timing['wait_minutes']} 分钟", Colors.YELLOW)
+            print_colored(f"原因: {entry_timing['reason']}", Colors.YELLOW)
+
+            # 记录入场建议，但不执行交易
+            self.logger.info(f"{symbol} {side} 入场时机不佳", extra={
+                "expected_price": entry_timing['expected_price'],
+                "wait_minutes": entry_timing['wait_minutes'],
+                "reason": entry_timing['reason']
+            })
             return False
-
-        # 计算实际需要的保证金
-        margin_required = amount / leverage
-
-        # 获取账户可用余额并检查保证金是否足够
-        has_enough_margin, available_margin = self.check_available_margin(symbol, margin_required)
-
-        if not has_enough_margin:
-            print(f"❌ 保证金不足: 需要 {margin_required:.2f} USDT, 可用 {available_margin:.2f} USDT")
-            return False
-
-        # 获取历史数据用于流动性分析
-        df = self.get_historical_data_with_cache(symbol)
-        if df is not None and not df.empty and len(df) >= 20:
-            df = calculate_optimized_indicators(df)
-
-        # 检查入场时机（除非是强制入场）
-        if not force_entry:
-            entry_timing = self.check_entry_timing(symbol, side)
-
-            # 如果入场时机不佳，添加到等待队列
-            if not entry_timing["should_enter"]:
-                print_colored(f"\n⏳ {symbol} {side} 入场时机不佳，已加入等待队列", Colors.YELLOW)
-                print_colored(f"预计更好的入场价格: {entry_timing['expected_price']:.6f}", Colors.YELLOW)
-                print_colored(f"预计等待时间: {entry_timing['wait_minutes']} 分钟", Colors.YELLOW)
-                print_colored(f"原因: {entry_timing['reason']}", Colors.YELLOW)
-
-                # 计算过期时间（以分钟计）
-                max_wait = min(entry_timing['wait_minutes'] * 1.5, 120)  # 最多等待预计时间的1.5倍或2小时
-                expiry_time = time.time() + max_wait * 60
-
-                # 获取当前质量评分
-                if df is not None and not df.empty:
-                    _, metrics = calculate_quality_score(df, self.client, symbol, None, self.config, self.logger)
-                    initial_quality_score = metrics.get('final_score', 5.0)
-                else:
-                    initial_quality_score = 5.0
-
-                # 添加到等待队列
-                self.entry_manager.add_waiting_entry({
-                    'symbol': symbol,
-                    'side': side,
-                    'amount': amount,
-                    'leverage': leverage,
-                    'target_price': entry_timing['expected_price'],
-                    'expiry_time': expiry_time,
-                    'entry_condition': entry_timing['reason'],
-                    'timing_quality': entry_timing['timing_quality'],
-                    'initial_quality_score': initial_quality_score,
-                    'min_quality_score': 6.0  # 最低执行质量分数
-                })
-
-                return False  # 不立即执行交易，返回False表示暂未成功
 
         try:
-            # 检测流动性事件，用于动态调整止盈止损
-            liquidity_events = None
-            if df is not None and not df.empty:
-                try:
-                    ticker = self.client.futures_symbol_ticker(symbol=symbol)
-                    current_price = float(ticker['price'])
-                    liquidity_events = detect_liquidity_events(df, current_price)
-
-                    if liquidity_events["detected_events"]:
-                        print_colored(
-                            f"⭐ 检测到{len(liquidity_events['detected_events'])}个流动性事件，质量评分: {liquidity_events['quality_score']:.2f}",
-                            Colors.GREEN)
-                except Exception as le:
-                    print_colored(f"流动性事件检测失败: {le}", Colors.WARNING)
-
             # 获取当前账户余额
             account_balance = self.get_futures_balance()
             print(f"📊 当前账户余额: {account_balance:.2f} USDC")
@@ -1529,24 +1526,15 @@ class EnhancedTradingBot:
             expected_movement = abs(predicted_price - current_price) / current_price * 100
 
             # 如果预期变动小于2.5%，则跳过交易
-            min_movement_threshold = 2.5
-
-            # 如果检测到高质量流动性事件，降低最小变动阈值
-            if liquidity_events and liquidity_events["quality_score"] >= 7:
-                min_movement_threshold = 1.5  # 高质量流动性事件时只需要1.5%的预期变动
-                print_colored(f"⭐ 高质量流动性事件降低最小变动阈值至{min_movement_threshold}%", Colors.GREEN)
-
-            if expected_movement < min_movement_threshold and not force_entry:
-                print_colored(
-                    f"⚠️ {symbol}的预期价格变动({expected_movement:.2f}%)小于最低要求({min_movement_threshold}%)",
-                    Colors.WARNING)
+            if expected_movement < 2.5:
+                print_colored(f"⚠️ {symbol}的预期价格变动({expected_movement:.2f}%)小于最低要求(2.5%)", Colors.WARNING)
                 self.logger.warning(f"{symbol}预期变动不足", extra={"expected_movement": expected_movement})
                 return False
 
             # ==== 动态止盈止损计算 ====
             # 默认止盈止损
             take_profit = 0.025  # 默认2.5%止盈
-            stop_loss = -0.02  # 默认2%止损
+            stop_loss = -0.02  # 默认1.75%止损
 
             # 根据预测幅度调整止盈止损
             if expected_movement >= 12.0:
@@ -1563,68 +1551,6 @@ class EnhancedTradingBot:
             else:
                 # 正常波动，使用默认值
                 print_colored(f"📊 正常波动预测({expected_movement:.2f}%)：使用默认止盈2.5%，止损2%", Colors.BLUE)
-
-            # 流动性事件止盈止损调整
-            if liquidity_events and liquidity_events["detected_events"]:
-                for event in liquidity_events["detected_events"]:
-                    event_type = event["type"]
-                    event_strength = event.get("strength", 0)
-
-                    # 流动性吸收通常提供更精确的止盈止损位
-                    if event_type == "liquidity_absorption" and event_strength >= 6:
-                        # 止损就设在流动性吸收水平之外
-                        level = event.get("level", 0)
-                        direction = event.get("direction", "")
-
-                        if level > 0:
-                            if side == "BUY" and direction == "low":
-                                # 多单止损设在低点流动性吸收水平下方
-                                custom_stop_loss = (level * 0.995 - current_price) / current_price
-                                if custom_stop_loss < stop_loss:  # 确保不会扩大止损
-                                    stop_loss = custom_stop_loss
-                                    print_colored(f"⭐ 基于低点流动性吸收调整止损至: {stop_loss * 100:.2f}%",
-                                                  Colors.GREEN)
-                            elif side == "SELL" and direction == "high":
-                                # 空单止损设在高点流动性吸收水平上方
-                                custom_stop_loss = (current_price - level * 1.005) / current_price
-                                if custom_stop_loss < stop_loss:  # 确保不会扩大止损
-                                    stop_loss = custom_stop_loss
-                                    print_colored(f"⭐ 基于高点流动性吸收调整止损至: {stop_loss * 100:.2f}%",
-                                                  Colors.GREEN)
-
-                    # 止损猎杀事件可能使常规止损无效，调整位置
-                    elif event_type == "stop_hunt" and event_strength >= 7:
-                        level = event.get("level", 0)
-                        direction = event.get("direction", "")
-
-                        if level > 0:
-                            if side == "BUY" and direction == "down_up":
-                                # 多单止损设在止损猎杀水平以下
-                                hunt_low = level * 0.99  # 低于猎杀水平1%
-                                custom_stop_loss = (hunt_low - current_price) / current_price
-                                if custom_stop_loss < stop_loss:  # 用更宽松的止损
-                                    stop_loss = custom_stop_loss
-                                    print_colored(f"⭐ 基于止损猎杀调整多单止损至: {stop_loss * 100:.2f}%", Colors.GREEN)
-
-                                # 可能需要更大的止盈
-                                if event_strength > 8:  # 非常强的猎杀反转
-                                    take_profit = max(take_profit, 0.05)  # 至少5%止盈
-                                    print_colored(f"⭐ 基于强猎杀反转调整多单止盈至: {take_profit * 100:.2f}%",
-                                                  Colors.GREEN)
-
-                            elif side == "SELL" and direction == "up_down":
-                                # 空单止损设在止损猎杀水平以上
-                                hunt_high = level * 1.01  # 高于猎杀水平1%
-                                custom_stop_loss = (current_price - hunt_high) / current_price
-                                if custom_stop_loss < stop_loss:  # 用更宽松的止损
-                                    stop_loss = custom_stop_loss
-                                    print_colored(f"⭐ 基于止损猎杀调整空单止损至: {stop_loss * 100:.2f}%", Colors.GREEN)
-
-                                # 可能需要更大的止盈
-                                if event_strength > 8:  # 非常强的猎杀反转
-                                    take_profit = max(take_profit, 0.05)  # 至少5%止盈
-                                    print_colored(f"⭐ 基于强猎杀反转调整空单止盈至: {take_profit * 100:.2f}%",
-                                                  Colors.GREEN)
 
             # 严格限制订单金额不超过账户余额的5%
             max_allowed_amount = account_balance * 0.05
@@ -1700,6 +1626,8 @@ class EnhancedTradingBot:
             print_colored(f"🔢 杠杆: {leverage}倍, 实际保证金: {notional / leverage:.2f} USDC", Colors.INFO)
             print_colored(f"📈 预期价格变动: {expected_movement:.2f}%, 从 {current_price:.6f} 到 {predicted_price:.6f}",
                           Colors.INFO)
+            print_colored(f"⚙️ 入场时机评估: {entry_timing['timing_quality']}", Colors.INFO)
+            print_colored(f"⚙️ 入场原因: {entry_timing['reason']}", Colors.INFO)
 
             # 设置杠杆
             try:
@@ -1738,18 +1666,15 @@ class EnhancedTradingBot:
                     "leverage": leverage,
                     "expected_movement": expected_movement,
                     "take_profit": take_profit * 100,
-                    "stop_loss": abs(stop_loss) * 100
+                    "stop_loss": abs(stop_loss) * 100,
+                    "entry_quality": entry_timing['timing_quality'],
+                    "entry_reason": entry_timing['reason']
                 })
 
                 # 记录持仓信息 - 使用动态止盈止损
                 self.record_open_position(symbol, side, current_price, quantity,
                                           take_profit=take_profit,  # 动态止盈
                                           stop_loss=stop_loss)  # 动态止损
-
-                # 执行成功后，从等待队列中移除（如果存在）
-                if hasattr(self, 'entry_manager'):
-                    self.entry_manager.remove_waiting_entry(symbol, side)
-
                 return True
 
             except Exception as e:
@@ -1774,8 +1699,6 @@ class EnhancedTradingBot:
             print_colored(f"❌ {symbol} {side} 交易过程中发生错误: {e}", Colors.ERROR)
             self.logger.error(f"{symbol} 交易错误", extra={"error": str(e)})
             return False
-
-
 
     def record_open_position(self, symbol, side, entry_price, quantity, take_profit=0.025, stop_loss=-0.0175):
         """记录新开的持仓，使用固定的止盈止损比例
@@ -2580,8 +2503,8 @@ if __name__ == "__main__":
     parser.add_argument('--stats', action='store_true', help='生成交易统计报告')
     args = parser.parse_args()
 
-    API_KEY = "mcTvvqngLrgJ07EBHun9Q8NHgFXxAEKwnQY22tPfYiVFDF25i0oBOxUklJ7yh9LU"
-    API_SECRET = "O3c1cSnw7GH4w7JgXMgIyPkiBDxvXbKfKH5Ti6oXKA1TBlUrHJV1T90Vgv8e6mwi"
+    API_KEY = "R1rNhHUjRNZ2Qkrbl05Odc7GseGaVSPqr7l7NHsI0AUHtY6sM4C24wJW14c01m5B"
+    API_SECRET = "AQPSTJN2CjfnvesLCdjKJffo5obacHqpMJIhtZPpoXwR40Ja90F03jSS9so5wJjW"
 
     bot = EnhancedTradingBot(API_KEY, API_SECRET, CONFIG)
 
